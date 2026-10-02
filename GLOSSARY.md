@@ -18,6 +18,10 @@ _Avoid_: account, auth file, model
 A period over which a provider limits how much one credential can use, such as the Claude 5-hour and 7-day limits or the Codex weekly limit.
 _Avoid_: session, limit period
 
+**Quota reading**:
+What the proxy last learned about one credential's quota window: the share left, the reset time, and when it was learned.
+_Avoid_: signal, watermark, snapshot
+
 **Reset time**:
 The moment a quota window ends and the credential's usage in that window returns to zero.
 _Avoid_: session end, renewal
