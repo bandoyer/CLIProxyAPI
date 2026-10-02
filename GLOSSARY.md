@@ -33,8 +33,12 @@ The rule that sends every request in a thread to the same credential while that 
 _Avoid_: sticky routing, account affinity, session affinity
 
 **Expiring-first routing**:
-The rule that, among usable credentials, prefers the one whose quota would be lost soonest at its next reset time.
+The rule that, among usable credentials, prefers the one with the highest urgency, so the quota that would be lost at a reset time is spent first.
 _Avoid_: smart routing, intelligent routing
+
+**Urgency**:
+The share of a credential's quota window still left, divided by the time until its reset time: how fast the credential must be used to lose nothing at reset.
+_Avoid_: score, burn rate, pace
 
 **Cache write**:
 A request that makes the provider store a new prompt prefix for reuse, instead of reading one it already stored.
