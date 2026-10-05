@@ -36,6 +36,10 @@ _Avoid_: session, chat
 The rule that sends every request in a thread to the same credential while that credential stays usable.
 _Avoid_: sticky routing, account affinity, session affinity
 
+**Binding**:
+The link between one thread, on one model, and the credential that affinity sends it to. It ends when the thread has been idle for a set time or the credential can no longer be used, and the next request then picks a credential again.
+_Avoid_: pin, sticky session
+
 **Expiring-first routing**:
 The rule that, among usable credentials, prefers the one with the highest urgency, so the quota that would be lost at a reset time is spent first.
 _Avoid_: smart routing, intelligent routing
