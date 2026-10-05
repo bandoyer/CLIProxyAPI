@@ -1,0 +1,1979 @@
+From 07d11c76aa33171be70bba72931020c39511d2cb Mon Sep 17 00:00:00 2001
+From: Dan Boyer <bandoyer@gmail.com>
+Date: Mon, 5 Oct 2026 16:53:05 -0400
+Subject: [PATCH 1/3] PROTOTYPE: Quota Management layout variants (A ledger, B
+ panels, C queue)
+
+Throwaway prototype for bandoyer/CLIProxyAPI#30. ?variant=A|B|C on #/quota,
+floating switcher, auto-loads Claude and Codex readings once.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ src/features/quota/QuotaPage.tsx              | 314 +++++----
+ .../quota/prototype/PrototypeSwitcher.tsx     |  46 ++
+ .../prototype/QuotaPrototype.module.scss      | 441 +++++++++++++
+ .../quota/prototype/QuotaPrototype.tsx        | 620 ++++++++++++++++++
+ src/features/quota/prototype/model.ts         | 211 ++++++
+ 5 files changed, 1506 insertions(+), 126 deletions(-)
+ create mode 100644 src/features/quota/prototype/PrototypeSwitcher.tsx
+ create mode 100644 src/features/quota/prototype/QuotaPrototype.module.scss
+ create mode 100644 src/features/quota/prototype/QuotaPrototype.tsx
+ create mode 100644 src/features/quota/prototype/model.ts
+
+diff --git a/src/features/quota/QuotaPage.tsx b/src/features/quota/QuotaPage.tsx
+index 1bd1570..5260f9e 100644
+--- a/src/features/quota/QuotaPage.tsx
++++ b/src/features/quota/QuotaPage.tsx
+@@ -52,6 +52,9 @@ import { useQuotaActions } from './hooks/useQuotaActions';
+ import { useQuotaBatchLoader } from './hooks/useQuotaBatchLoader';
+ import { readQuotaUiState, writeQuotaUiState } from './uiState';
+ import styles from './QuotaPage.module.scss';
++// PROTOTYPE (throwaway): layout variants for bandoyer/CLIProxyAPI#30.
++import { PROTOTYPE_VARIANTS, QuotaPrototype } from './prototype/QuotaPrototype';
++import { PrototypeSwitcher } from './prototype/PrototypeSwitcher';
+ 
+ const TAB_IDS: string[] = ['all', ...QUOTA_TAB_ORDER];
+ const SKELETON_CARD_COUNT = 6;
+@@ -77,6 +80,21 @@ export function QuotaPage() {
+   const [page, setPage] = useState(1);
+   const [search, setSearch] = useState('');
+   const searchInputRef = useRef<HTMLInputElement>(null);
++  // PROTOTYPE: ?variant=A|B|C swaps the rendering; absent = stock.
++  // The layout keeps this page mounted, so it reads the URL once and then
++  // keeps the variant in state (and localStorage, so a reload keeps it).
++  const [variant, setVariantState] = useState(
++    () =>
++      new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('variant') ??
++      localStorage.getItem('quotaPrototypeVariant') ??
++      'stock'
++  );
++  const setVariant = useCallback((key: string) => {
++    setVariantState(key);
++    localStorage.setItem('quotaPrototypeVariant', key);
++    const path = window.location.hash.split('?')[0];
++    window.history.replaceState(null, '', key === 'stock' ? path : `${path}?variant=${key}`);
++  }, []);
+   // 页头 + tabs 的入场级联（标题 → meta → 动作 → tabs，级差 70ms）
+   const revealRef = useRevealGroup<HTMLDivElement>();
+ 
+@@ -290,6 +308,19 @@ export function QuotaPage() {
+ 
+   const canUseActions = !disableControls && !loading && filesGeneration === sessionGeneration;
+ 
++  // PROTOTYPE: the summary cards need every reading, so load each idle Claude
++  // and Codex credential once. xAI and others stay click-to-load.
++  useEffect(() => {
++    if (variant === 'stock' || !canUseActions || batchLoading) return;
++    const idle = entries.filter(
++      (entry) =>
++        (entry.type === 'claude' || entry.type === 'codex') &&
++        !entry.file.disabled &&
++        (getQuota(entry)?.status ?? 'idle') === 'idle'
++    );
++    if (idle.length > 0) void loadQuota(idle);
++  }, [variant, canUseActions, batchLoading, entries, getQuota, loadQuota]);
++
+   /* ---------- 首屏卡片一次性级联入场 ----------
+    * 首批数据渲染后立即翻转 cardsAnimated；已挂载的卡片在挂载时捕获过自己的
+    * 延迟（QuotaCard 内 useState 初始化），后续切 tab/翻页/刷新新挂载的卡片
+@@ -335,138 +366,169 @@ export function QuotaPage() {
+           />
+         </div>
+ 
+-        <div className={styles.toolbar}>
+-          <div className={styles.search}>
+-            <IconSearch size={16} className={styles.searchIcon} aria-hidden="true" />
+-            <input
+-              ref={searchInputRef}
+-              className={styles.searchInput}
+-              type="search"
+-              value={search}
+-              onChange={(event) => handleSearchChange(event.target.value)}
+-              placeholder={t('quota_management.search_placeholder')}
+-              aria-label={t('quota_management.search_label')}
+-            />
+-            {search && (
+-              <button
+-                type="button"
+-                className={styles.clearSearch}
+-                aria-label={t('quota_management.search_clear')}
+-                title={t('quota_management.search_clear')}
+-                onClick={() => {
+-                  handleSearchChange('');
+-                  searchInputRef.current?.focus();
+-                }}
+-              >
+-                <IconX size={14} aria-hidden="true" />
+-              </button>
++        {variant !== 'stock' && !loading ? (
++          <QuotaPrototype
++            variant={variant}
++            entries={filteredEntries}
++            getQuota={getQuota}
++            resolvedTheme={resolvedTheme}
++            canRefresh={canUseActions}
++            onRefresh={(entry) => void refreshQuota(entry.file, QUOTA_ADAPTERS[entry.type])}
++            renderCards={(cardEntries) => (
++              <div className={styles.grid}>
++                {cardEntries.map((entry) => (
++                  <QuotaCard
++                    key={`${entry.type}:${getQuotaCacheKey(entry.file)}`}
++                    entry={entry}
++                    quota={getQuota(entry)}
++                    resolvedTheme={resolvedTheme}
++                    canRefresh={canUseActions && !entry.file.disabled}
++                    resetting={resettingQuotaName === getQuotaCacheKey(entry.file)}
++                    entranceDelayMs={null}
++                    onRefresh={() => void refreshQuota(entry.file, QUOTA_ADAPTERS[entry.type])}
++                    onReset={() => resetQuota(entry.file, QUOTA_ADAPTERS[entry.type])}
++                  />
++                ))}
++              </div>
+             )}
+-          </div>
+-          <div className={styles.sort}>
+-            <Select
+-              value={sortMode}
+-              options={sortOptions}
+-              onChange={handleSortModeChange}
+-              ariaLabel={t('quota_management.sort_label')}
+-              size="sm"
+-            />
+-          </div>
+-        </div>
+-
+-        {error && (
+-          <div className={styles.errorBanner} role="alert">
+-            {error}
+-          </div>
+-        )}
+-
+-        {loading ? (
+-          <div className={styles.grid} aria-hidden="true">
+-            {Array.from({ length: SKELETON_CARD_COUNT }, (_, index) => (
+-              <Skeleton key={index} height={168} rounded={14} />
+-            ))}
+-          </div>
+-        ) : isEmpty ? (
+-          <EmptyState
+-            title={
+-              search.trim()
+-                ? t('quota_management.search_empty_title')
+-                : tab === 'all'
+-                  ? t('quota_management.empty_title')
+-                  : t(`${QUOTA_ADAPTERS[tab].i18nPrefix}.empty_title`)
+-            }
+-            description={
+-              search.trim()
+-                ? t('quota_management.search_empty_desc')
+-                : tab === 'all'
+-                  ? t('quota_management.empty_desc')
+-                  : t(`${QUOTA_ADAPTERS[tab].i18nPrefix}.empty_desc`)
+-            }
+-            action={
+-              search.trim() ? (
+-                <Button variant="secondary" size="sm" onClick={() => handleSearchChange('')}>
+-                  {t('quota_management.search_clear')}
+-                </Button>
+-              ) : tab === 'all' ? undefined : (
+-                <Button variant="secondary" size="sm" onClick={() => handleTabChange('all')}>
+-                  {t('auth_files.filter_all')}
+-                </Button>
+-              )
+-            }
+           />
+         ) : (
+-          <div className={styles.grid}>
+-            {pageItems.map((entry, index) => (
+-              <QuotaCard
+-                key={`${entry.type}:${getQuotaCacheKey(entry.file)}`}
+-                entry={entry}
+-                quota={getQuota(entry)}
+-                resolvedTheme={resolvedTheme}
+-                canRefresh={canUseActions && !entry.file.disabled}
+-                resetting={resettingQuotaName === getQuotaCacheKey(entry.file)}
+-                entranceDelayMs={cardEntranceDelay(index)}
+-                onRefresh={() => void refreshQuota(entry.file, QUOTA_ADAPTERS[entry.type])}
+-                onReset={() => resetQuota(entry.file, QUOTA_ADAPTERS[entry.type])}
+-              />
+-            ))}
+-          </div>
+-        )}
+-
+-        {!loading && filteredEntries.length > QUOTA_PAGE_SIZE && (
+-          <div className={styles.pagination}>
+-            <Button
+-              variant="secondary"
+-              size="sm"
+-              onClick={() => setPage(Math.max(1, currentPage - 1))}
+-              disabled={currentPage <= 1}
+-            >
+-              {t('auth_files.pagination_prev')}
+-            </Button>
+-            <div className={styles.pageInfo}>
+-              {t('auth_files.pagination_info', {
+-                current: currentPage,
+-                total: totalPages,
+-                count: filteredEntries.length,
+-              })}
++          <>
++            <div className={styles.toolbar}>
++              <div className={styles.search}>
++                <IconSearch size={16} className={styles.searchIcon} aria-hidden="true" />
++                <input
++                  ref={searchInputRef}
++                  className={styles.searchInput}
++                  type="search"
++                  value={search}
++                  onChange={(event) => handleSearchChange(event.target.value)}
++                  placeholder={t('quota_management.search_placeholder')}
++                  aria-label={t('quota_management.search_label')}
++                />
++                {search && (
++                  <button
++                    type="button"
++                    className={styles.clearSearch}
++                    aria-label={t('quota_management.search_clear')}
++                    title={t('quota_management.search_clear')}
++                    onClick={() => {
++                      handleSearchChange('');
++                      searchInputRef.current?.focus();
++                    }}
++                  >
++                    <IconX size={14} aria-hidden="true" />
++                  </button>
++                )}
++              </div>
++              <div className={styles.sort}>
++                <Select
++                  value={sortMode}
++                  options={sortOptions}
++                  onChange={handleSortModeChange}
++                  ariaLabel={t('quota_management.sort_label')}
++                  size="sm"
++                />
++              </div>
+             </div>
+-            <Button
+-              variant="secondary"
+-              size="sm"
+-              onClick={() => setPage(Math.min(totalPages, currentPage + 1))}
+-              disabled={currentPage >= totalPages}
+-            >
+-              {t('auth_files.pagination_next')}
+-            </Button>
+-          </div>
+-        )}
+ 
+-        {/* 时间线只比较当前页凭证，避免大量凭证一次性生成无界泳道。 */}
+-        <QuotaTimeline
+-          entries={pageItems}
+-          quotaFor={getQuota}
+-          displayNameFor={displayNameFor}
+-          resolvedTheme={resolvedTheme}
+-        />
++            {error && (
++              <div className={styles.errorBanner} role="alert">
++                {error}
++              </div>
++            )}
++
++            {loading ? (
++              <div className={styles.grid} aria-hidden="true">
++                {Array.from({ length: SKELETON_CARD_COUNT }, (_, index) => (
++                  <Skeleton key={index} height={168} rounded={14} />
++                ))}
++              </div>
++            ) : isEmpty ? (
++              <EmptyState
++                title={
++                  search.trim()
++                    ? t('quota_management.search_empty_title')
++                    : tab === 'all'
++                      ? t('quota_management.empty_title')
++                      : t(`${QUOTA_ADAPTERS[tab].i18nPrefix}.empty_title`)
++                }
++                description={
++                  search.trim()
++                    ? t('quota_management.search_empty_desc')
++                    : tab === 'all'
++                      ? t('quota_management.empty_desc')
++                      : t(`${QUOTA_ADAPTERS[tab].i18nPrefix}.empty_desc`)
++                }
++                action={
++                  search.trim() ? (
++                    <Button variant="secondary" size="sm" onClick={() => handleSearchChange('')}>
++                      {t('quota_management.search_clear')}
++                    </Button>
++                  ) : tab === 'all' ? undefined : (
++                    <Button variant="secondary" size="sm" onClick={() => handleTabChange('all')}>
++                      {t('auth_files.filter_all')}
++                    </Button>
++                  )
++                }
++              />
++            ) : (
++              <div className={styles.grid}>
++                {pageItems.map((entry, index) => (
++                  <QuotaCard
++                    key={`${entry.type}:${getQuotaCacheKey(entry.file)}`}
++                    entry={entry}
++                    quota={getQuota(entry)}
++                    resolvedTheme={resolvedTheme}
++                    canRefresh={canUseActions && !entry.file.disabled}
++                    resetting={resettingQuotaName === getQuotaCacheKey(entry.file)}
++                    entranceDelayMs={cardEntranceDelay(index)}
++                    onRefresh={() => void refreshQuota(entry.file, QUOTA_ADAPTERS[entry.type])}
++                    onReset={() => resetQuota(entry.file, QUOTA_ADAPTERS[entry.type])}
++                  />
++                ))}
++              </div>
++            )}
++
++            {!loading && filteredEntries.length > QUOTA_PAGE_SIZE && (
++              <div className={styles.pagination}>
++                <Button
++                  variant="secondary"
++                  size="sm"
++                  onClick={() => setPage(Math.max(1, currentPage - 1))}
++                  disabled={currentPage <= 1}
++                >
++                  {t('auth_files.pagination_prev')}
++                </Button>
++                <div className={styles.pageInfo}>
++                  {t('auth_files.pagination_info', {
++                    current: currentPage,
++                    total: totalPages,
++                    count: filteredEntries.length,
++                  })}
++                </div>
++                <Button
++                  variant="secondary"
++                  size="sm"
++                  onClick={() => setPage(Math.min(totalPages, currentPage + 1))}
++                  disabled={currentPage >= totalPages}
++                >
++                  {t('auth_files.pagination_next')}
++                </Button>
++              </div>
++            )}
++
++            {/* 时间线只比较当前页凭证，避免大量凭证一次性生成无界泳道。 */}
++            <QuotaTimeline
++              entries={pageItems}
++              quotaFor={getQuota}
++              displayNameFor={displayNameFor}
++              resolvedTheme={resolvedTheme}
++            />
++          </>
++        )}
+       </section>
++      <PrototypeSwitcher variants={PROTOTYPE_VARIANTS} current={variant} onChange={setVariant} />
+     </div>
+   );
+ }
+diff --git a/src/features/quota/prototype/PrototypeSwitcher.tsx b/src/features/quota/prototype/PrototypeSwitcher.tsx
+new file mode 100644
+index 0000000..3f96668
+--- /dev/null
++++ b/src/features/quota/prototype/PrototypeSwitcher.tsx
+@@ -0,0 +1,46 @@
++/** PROTOTYPE (throwaway): floating variant switcher for the quota prototype. */
++
++import { useEffect } from 'react';
++import styles from './QuotaPrototype.module.scss';
++
++export interface PrototypeSwitcherProps {
++  variants: readonly { key: string; name: string }[];
++  current: string;
++  onChange: (key: string) => void;
++}
++
++export function PrototypeSwitcher({ variants, current, onChange }: PrototypeSwitcherProps) {
++  const index = Math.max(
++    0,
++    variants.findIndex((v) => v.key === current)
++  );
++  const step = (delta: number) =>
++    onChange(variants[(index + delta + variants.length) % variants.length].key);
++
++  useEffect(() => {
++    const onKey = (event: KeyboardEvent) => {
++      const target = event.target as HTMLElement | null;
++      if (target?.closest('input, textarea, select, [contenteditable]')) return;
++      if (event.key === 'ArrowLeft') step(-1);
++      if (event.key === 'ArrowRight') step(1);
++    };
++    window.addEventListener('keydown', onKey);
++    return () => window.removeEventListener('keydown', onKey);
++  });
++
++  if (!import.meta.env.DEV) return null;
++  const v = variants[index];
++  return (
++    <div className={styles.switcher}>
++      <button type="button" onClick={() => step(-1)} aria-label="Previous variant">
++        ←
++      </button>
++      <span>
++        {v.key} ({v.name})
++      </span>
++      <button type="button" onClick={() => step(1)} aria-label="Next variant">
++        →
++      </button>
++    </div>
++  );
++}
+diff --git a/src/features/quota/prototype/QuotaPrototype.module.scss b/src/features/quota/prototype/QuotaPrototype.module.scss
+new file mode 100644
+index 0000000..52322c9
+--- /dev/null
++++ b/src/features/quota/prototype/QuotaPrototype.module.scss
+@@ -0,0 +1,441 @@
++/* PROTOTYPE (throwaway): styles for the Quota Management layout prototype. */
++
++.root {
++  display: flex;
++  flex-direction: column;
++  gap: 18px;
++  padding-bottom: 80px;
++}
++
++.muted {
++  color: var(--text-tertiary);
++}
++
++.small {
++  font-size: 12px;
++}
++
++.error {
++  color: var(--viz-failure);
++  font-size: 13px;
++}
++
++.icon {
++  width: 18px;
++  height: 18px;
++  object-fit: contain;
++}
++
++/* ---------- bars ---------- */
++
++.bar,
++.segment {
++  height: 4px;
++  border-radius: 2px;
++  background: var(--bg-tertiary);
++  overflow: hidden;
++}
++
++.barFill {
++  height: 100%;
++  border-radius: 2px;
++}
++
++.levelHigh {
++  background: var(--viz-success);
++}
++.levelMedium {
++  background: var(--quota-medium-color);
++}
++.levelLow {
++  background: var(--viz-failure);
++}
++.levelNone {
++  background: transparent;
++}
++
++.segments {
++  display: flex;
++  gap: 6px;
++  margin: 6px 0;
++
++  .segment {
++    flex: 1;
++  }
++}
++
++.dot {
++  display: inline-block;
++  width: 7px;
++  height: 7px;
++  border-radius: 50%;
++  margin-right: 5px;
++}
++
++/* ---------- text ---------- */
++
++.when {
++  font-size: 12.5px;
++  font-variant-numeric: tabular-nums;
++}
++
++.whenRel {
++  color: var(--text-secondary);
++  font-weight: 600;
++}
++
++.fileName {
++  font-family: var(--font-mono, ui-monospace, monospace);
++  font-size: 13.5px;
++  font-weight: 600;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++
++.plan {
++  font-size: 12.5px;
++  margin-top: 4px;
++  color: var(--text-secondary);
++}
++
++.bigNumber {
++  font-size: 30px;
++  font-weight: 700;
++  font-variant-numeric: tabular-nums;
++
++  span {
++    font-size: 14px;
++    font-weight: 400;
++  }
++}
++
++.midNumber {
++  font-size: 20px;
++  font-weight: 700;
++  font-variant-numeric: tabular-nums;
++
++  span {
++    font-size: 12px;
++    font-weight: 400;
++  }
++}
++
++.linkButton {
++  background: none;
++  border: none;
++  padding: 0;
++  color: var(--text-secondary);
++  cursor: pointer;
++  font-size: 13px;
++
++  &:hover:not(:disabled) {
++    color: var(--text-primary);
++    text-decoration: underline;
++  }
++}
++
++/* ---------- windows ---------- */
++
++.windowCells {
++  display: grid;
++  grid-template-columns: repeat(4, minmax(150px, 1fr));
++  gap: 24px;
++  align-items: start;
++}
++
++.windowCell {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++  min-width: 0;
++}
++
++.windowHead {
++  display: flex;
++  justify-content: space-between;
++  gap: 8px;
++  font-size: 13px;
++}
++
++.windowLabel {
++  color: var(--text-secondary);
++}
++
++.windowPct {
++  font-weight: 700;
++  font-variant-numeric: tabular-nums;
++}
++
++/* ---------- actions ---------- */
++
++.actions {
++  display: flex;
++  gap: 14px;
++  justify-content: flex-end;
++  white-space: nowrap;
++}
++
++.action {
++  display: inline-flex;
++  align-items: center;
++  gap: 5px;
++  background: none;
++  border: none;
++  color: var(--text-tertiary);
++  cursor: pointer;
++  font-size: 13px;
++
++  &:hover:not(:disabled) {
++    color: var(--text-primary);
++  }
++
++  &:disabled {
++    opacity: 0.45;
++    cursor: not-allowed;
++  }
++}
++
++.spinning {
++  animation: proto-spin 1s linear infinite;
++}
++
++@keyframes proto-spin {
++  to {
++    transform: rotate(360deg);
++  }
++}
++
++/* ---------- A: ledger ---------- */
++
++.viewRow {
++  display: flex;
++  justify-content: flex-end;
++  margin-top: -6px;
++
++  > * {
++    width: 160px;
++  }
++}
++
++.summaryRow {
++  display: grid;
++  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
++  border: 1px solid var(--border-color);
++  border-radius: 14px;
++  overflow: hidden;
++}
++
++.summaryCard {
++  padding: 18px 20px;
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++  border-right: 1px solid var(--border-color);
++
++  &:last-child {
++    border-right: none;
++  }
++}
++
++.summaryHead {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  margin-bottom: 8px;
++
++  > span:last-child {
++    margin-left: auto;
++    font-size: 12.5px;
++  }
++}
++
++.summaryOthers {
++  margin-top: 12px;
++  padding-top: 12px;
++  border-top: 1px solid var(--border-color);
++  display: flex;
++  flex-wrap: wrap;
++  justify-content: space-between;
++  gap: 8px;
++  font-size: 13px;
++}
++
++.summaryOther {
++  flex-basis: 100%;
++}
++
++.group {
++  display: flex;
++  flex-direction: column;
++}
++
++.groupTitle {
++  font-size: 15px;
++  margin: 10px 0 6px;
++}
++
++.ledgerRow {
++  display: grid;
++  grid-template-columns: minmax(240px, 1.2fr) 4fr auto;
++  gap: 24px;
++  align-items: center;
++  padding: 16px 4px;
++  border-bottom: 1px solid var(--border-color);
++}
++
++.nameCell {
++  min-width: 0;
++}
++
++/* ---------- B: panels ---------- */
++
++.panel {
++  border: 1px solid var(--border-color);
++  border-radius: 14px;
++  overflow-x: auto;
++}
++
++.panelGrid {
++  display: grid;
++  align-items: center;
++}
++
++.panelHeadCell {
++  padding: 16px 14px;
++  background: var(--bg-secondary);
++  border-bottom: 1px solid var(--border-color);
++  align-self: stretch;
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++}
++
++.headlineCol {
++  box-shadow: inset 0 3px 0 var(--primary-color);
++}
++
++.panelRow {
++  display: contents;
++
++  > * {
++    padding: 14px;
++    border-bottom: 1px solid var(--border-color);
++    align-self: stretch;
++    display: flex;
++    flex-direction: column;
++    justify-content: center;
++  }
++}
++
++/* ---------- C: queue ---------- */
++
++.strip {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 10px;
++}
++
++.stripItem {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  padding: 8px 14px;
++  border: 1px solid var(--border-color);
++  border-radius: 999px;
++  font-size: 13px;
++}
++
++.stripBar {
++  width: 90px;
++}
++
++.queue {
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++}
++
++.queueRow {
++  display: grid;
++  grid-template-columns: 32px 20px minmax(220px, 1.2fr) minmax(200px, 1.4fr) 80px 2fr auto;
++  gap: 16px;
++  align-items: center;
++  padding: 14px 16px;
++  border: 1px solid var(--border-color);
++  border-radius: 12px;
++}
++
++.dimmed {
++  opacity: 0.55;
++}
++
++.rank {
++  font-size: 22px;
++  font-weight: 700;
++  text-align: center;
++  font-variant-numeric: tabular-nums;
++}
++
++.queueMain {
++  min-width: 0;
++}
++
++.queueUrgency {
++  text-align: center;
++  font-size: 12px;
++
++  strong {
++    font-size: 18px;
++  }
++}
++
++.chips {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 6px;
++}
++
++.chip {
++  display: inline-flex;
++  align-items: center;
++  padding: 3px 9px;
++  border-radius: 999px;
++  background: var(--bg-tertiary);
++  font-size: 12px;
++}
++
++.chipBad {
++  color: var(--viz-failure);
++}
++
++/* ---------- switcher ---------- */
++
++.switcher {
++  position: fixed;
++  left: 50%;
++  bottom: 18px;
++  transform: translateX(-50%);
++  z-index: 1000;
++  display: flex;
++  align-items: center;
++  gap: 10px;
++  padding: 8px 12px;
++  border-radius: 999px;
++  background: #ff3d7f;
++  color: #fff;
++  font-weight: 700;
++  font-size: 13px;
++  box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
++
++  button {
++    background: rgb(255 255 255 / 0.2);
++    border: none;
++    color: #fff;
++    border-radius: 50%;
++    width: 28px;
++    height: 28px;
++    cursor: pointer;
++    font-size: 15px;
++  }
++}
+diff --git a/src/features/quota/prototype/QuotaPrototype.tsx b/src/features/quota/prototype/QuotaPrototype.tsx
+new file mode 100644
+index 0000000..df8c9ad
+--- /dev/null
++++ b/src/features/quota/prototype/QuotaPrototype.tsx
+@@ -0,0 +1,620 @@
++/**
++ * PROTOTYPE (throwaway): three Quota Management layouts on the real /quota
++ * route, picked with ?variant=A|B|C (stock when absent). Branch
++ * prototype/quota-ledger only. Answers bandoyer/CLIProxyAPI#30.
++ *
++ * A — Ledger: Theo's layout. Summary cards, then rows grouped by provider.
++ * B — Panels: one panel per provider; every window column carries its total.
++ * C — Queue: one list across providers, in expiring-first order.
++ *
++ * "Reset quota" is shown but disabled: it would spend a real manual reset.
++ */
++
++import { useMemo, useState, type ReactNode } from 'react';
++import { useTranslation } from 'react-i18next';
++import { IconRefreshCw } from '@/components/ui/icons';
++import { Select } from '@/components/ui/Select';
++import { useNow } from '@/hooks/useNow';
++import type { ResolvedTheme } from '@/types';
++import { formatInstantShort, formatRelativeInstant } from '@/utils/quota';
++import { getQuotaDisplayName } from '@/utils/quota/identity';
++import { getAuthFileIcon, getTypeLabel } from '@/features/authFiles/constants';
++import type { QuotaFileEntry } from '../logic';
++import type { QuotaCardState } from '../providers';
++import type { QuotaProviderType } from '../providers/types';
++import { buildRow, summarize, urgencyOf, type ProtoProviderSummary, type ProtoRow } from './model';
++import styles from './QuotaPrototype.module.scss';
++
++export const PROTOTYPE_VARIANTS = [
++  { key: 'stock', name: 'Stock' },
++  { key: 'A', name: 'Ledger (Theo)' },
++  { key: 'B', name: 'Provider panels' },
++  { key: 'C', name: 'Expiring-first queue' },
++] as const;
++
++export interface QuotaPrototypeProps {
++  variant: string;
++  entries: QuotaFileEntry[];
++  getQuota: (entry: QuotaFileEntry) => QuotaCardState | undefined;
++  resolvedTheme: ResolvedTheme;
++  canRefresh: boolean;
++  onRefresh: (entry: QuotaFileEntry) => void;
++  /** Stock card grid, for the "Ledger" drop-down's Cards option. */
++  renderCards: (entries: QuotaFileEntry[]) => ReactNode;
++}
++
++/* ---------- small shared pieces ---------- */
++
++const levelClass = (left: number | null) =>
++  left === null
++    ? styles.levelNone
++    : left >= 70
++      ? styles.levelHigh
++      : left >= 30
++        ? styles.levelMedium
++        : styles.levelLow;
++
++const pct = (value: number | null) => (value === null ? '--' : `${Math.round(value)}%`);
++
++function Bar({ left }: { left: number | null }) {
++  return (
++    <div className={styles.bar}>
++      <div
++        className={`${styles.barFill} ${levelClass(left)}`}
++        style={{ width: `${Math.min(100, Math.max(0, left ?? 0))}%` }}
++      />
++    </div>
++  );
++}
++
++function Segments({ values }: { values: (number | null)[] }) {
++  return (
++    <div className={styles.segments}>
++      {values.map((v, i) => (
++        <div key={i} className={styles.segment}>
++          <div
++            className={`${styles.barFill} ${levelClass(v)}`}
++            style={{ width: `${Math.min(100, Math.max(0, v ?? 0))}%` }}
++          />
++        </div>
++      ))}
++    </div>
++  );
++}
++
++function When({
++  atMs,
++  now,
++  empty = 'No reset pending',
++}: {
++  atMs: number | null;
++  now: number;
++  empty?: string;
++}) {
++  const { i18n } = useTranslation();
++  if (atMs === null) return <span className={`${styles.when} ${styles.muted}`}>{empty}</span>;
++  return (
++    <span className={styles.when}>
++      <span className={styles.whenRel}>
++        {formatRelativeInstant(atMs, now, i18n.resolvedLanguage)}
++      </span>
++      <span className={styles.muted}> · {formatInstantShort(atMs)}</span>
++    </span>
++  );
++}
++
++function ProviderIcon({ type, theme }: { type: QuotaProviderType; theme: ResolvedTheme }) {
++  const src = getAuthFileIcon(type, theme);
++  return src ? <img src={src} alt="" className={styles.icon} /> : null;
++}
++
++function PlanLine({ row, now }: { row: ProtoRow; now: number }) {
++  const { i18n } = useTranslation();
++  if (!row.plan && row.renewsAtMs === null) return null;
++  return (
++    <div className={styles.plan}>
++      {row.plan && <strong>{row.plan}</strong>}
++      {row.renewsAtMs !== null && (
++        <span className={styles.muted}>
++          {' '}
++          · renews {formatInstantShort(row.renewsAtMs)} ·{' '}
++          {formatRelativeInstant(row.renewsAtMs, now, i18n.resolvedLanguage)}
++        </span>
++      )}
++    </div>
++  );
++}
++
++function RowState({
++  row,
++  onRefresh,
++  canRefresh,
++}: {
++  row: ProtoRow;
++  onRefresh: () => void;
++  canRefresh: boolean;
++}) {
++  const { t } = useTranslation();
++  if (row.status === 'loading') return <span className={styles.muted}>Loading…</span>;
++  if (row.status === 'error')
++    return <span className={styles.error}>{row.quota?.error || t('common.unknown_error')}</span>;
++  if (row.status === 'idle')
++    return (
++      <button
++        type="button"
++        className={styles.linkButton}
++        onClick={onRefresh}
++        disabled={!canRefresh}
++      >
++        Not loaded — click to load
++      </button>
++    );
++  return null;
++}
++
++function Actions({
++  row,
++  onRefresh,
++  canRefresh,
++}: {
++  row: ProtoRow;
++  onRefresh: () => void;
++  canRefresh: boolean;
++}) {
++  const { t } = useTranslation();
++  return (
++    <div className={styles.actions}>
++      {row.entry.type === 'codex' && row.status === 'success' && (
++        <button
++          type="button"
++          className={styles.action}
++          disabled
++          title="Disabled in the prototype: it spends a real manual reset"
++        >
++          <IconRefreshCw size={13} /> {t('codex_quota.reset_button')}
++        </button>
++      )}
++      <button
++        type="button"
++        className={styles.action}
++        onClick={onRefresh}
++        disabled={!canRefresh || row.status === 'loading'}
++      >
++        <IconRefreshCw
++          size={13}
++          className={row.status === 'loading' ? styles.spinning : undefined}
++        />{' '}
++        {t('auth_files.quota_refresh_single')}
++      </button>
++    </div>
++  );
++}
++
++function WindowCell({
++  label,
++  left,
++  resetAtMs,
++  now,
++}: {
++  label?: string;
++  left: number | null;
++  resetAtMs: number | null;
++  now: number;
++}) {
++  return (
++    <div className={styles.windowCell}>
++      <div className={styles.windowHead}>
++        {label !== undefined && <span className={styles.windowLabel}>{label}</span>}
++        <span className={styles.windowPct}>{pct(left)}</span>
++      </div>
++      <Bar left={left} />
++      <When atMs={resetAtMs} now={now} />
++    </div>
++  );
++}
++
++function ExtraCell({ row, now }: { row: ProtoRow; now: number }) {
++  if (row.manualResets) {
++    return (
++      <div className={styles.windowCell}>
++        <div className={styles.windowHead}>
++          <span className={styles.windowLabel}>Manual resets</span>
++        </div>
++        <div>
++          <strong>{row.manualResets.count}</strong> <span className={styles.muted}>available</span>
++        </div>
++        {row.manualResets.firstExpiryMs !== null && (
++          <div className={styles.small}>
++            <span className={styles.muted}>Reset 1 expires </span>
++            <When atMs={row.manualResets.firstExpiryMs} now={now} />
++          </div>
++        )}
++      </div>
++    );
++  }
++  if (row.credits) {
++    const dollars = (c: number | null) => (c === null ? '--' : `$${(c / 100).toFixed(2)}`);
++    return (
++      <div className={styles.windowCell}>
++        <div className={styles.windowHead}>
++          <span className={styles.windowLabel}>Monthly credits</span>
++        </div>
++        <div>
++          <strong>{dollars(row.credits.usedCents)}</strong>{' '}
++          <span className={styles.muted}>/ {dollars(row.credits.limitCents)}</span>
++        </div>
++      </div>
++    );
++  }
++  return null;
++}
++
++/* ---------- data ---------- */
++
++function useSummaries(entries: QuotaFileEntry[], getQuota: QuotaPrototypeProps['getQuota']) {
++  const { t } = useTranslation();
++  return useMemo(() => {
++    const byType = new Map<QuotaProviderType, ProtoRow[]>();
++    entries.forEach((entry) => {
++      const rows = byType.get(entry.type) ?? [];
++      rows.push(buildRow(entry, getQuota(entry), t));
++      byType.set(entry.type, rows);
++    });
++    return Array.from(byType.entries()).map(([type, rows]) => summarize(type, rows));
++  }, [entries, getQuota, t]);
++}
++
++/* ---------- Variant A: Theo's ledger ---------- */
++
++function SummaryCard({
++  summary,
++  theme,
++  now,
++}: {
++  summary: ProtoProviderSummary;
++  theme: ResolvedTheme;
++  now: number;
++}) {
++  const { t } = useTranslation();
++  const [open, setOpen] = useState(false);
++  const h = summary.headline;
++  const others = summary.totals
++    .filter((x) => x !== h)
++    .sort((a, b) => (b.periodHours ?? 0) - (a.periodHours ?? 0));
++  const n = summary.rows.length;
++  return (
++    <div className={styles.summaryCard}>
++      <div className={styles.summaryHead}>
++        <ProviderIcon type={summary.type} theme={theme} />
++        <strong>{getTypeLabel(t, summary.type)}</strong>
++        <span className={styles.muted}>
++          {n} credential{n === 1 ? '' : 's'}
++        </span>
++      </div>
++      {h ? (
++        <>
++          <div className={styles.muted}>{h.label}</div>
++          <div className={styles.bigNumber}>
++            {pct(h.sumLeft)} <span className={styles.muted}>of {h.outOf}%</span>
++          </div>
++          <Segments values={h.segments} />
++          <When atMs={h.soonestResetMs} now={now} />
++          {others.length > 0 && (
++            <div className={styles.summaryOthers}>
++              {!open && (
++                <span>
++                  <span className={styles.muted}>{others[0].label}</span>{' '}
++                  <strong>{pct(others[0].sumLeft)}</strong>
++                </span>
++              )}
++              <button type="button" className={styles.linkButton} onClick={() => setOpen(!open)}>
++                {open ? 'Hide' : 'Show'}
++              </button>
++              {open &&
++                others.map((o) => (
++                  <div key={o.id} className={styles.summaryOther}>
++                    <div className={styles.windowHead}>
++                      <span className={styles.muted}>{o.label}</span>
++                      <span>
++                        <strong>{pct(o.sumLeft)}</strong>{' '}
++                        <span className={styles.muted}>of {o.outOf}%</span>
++                      </span>
++                    </div>
++                    <Segments values={o.segments} />
++                    <When atMs={o.soonestResetMs} now={now} />
++                  </div>
++                ))}
++            </div>
++          )}
++        </>
++      ) : (
++        <div className={styles.muted}>No readings loaded</div>
++      )}
++    </div>
++  );
++}
++
++function VariantA(props: QuotaPrototypeProps) {
++  const { entries, getQuota, resolvedTheme, canRefresh, onRefresh, renderCards } = props;
++  const { t } = useTranslation();
++  const now = useNow();
++  const summaries = useSummaries(entries, getQuota);
++  const [view, setView] = useState('ledger');
++  return (
++    <div className={styles.root}>
++      <div className={styles.viewRow}>
++        <Select
++          value={view}
++          size="sm"
++          ariaLabel="View"
++          onChange={setView}
++          options={[
++            { value: 'ledger', label: 'Ledger' },
++            { value: 'cards', label: 'Cards' },
++          ]}
++        />
++      </div>
++      <div className={styles.summaryRow}>
++        {summaries.map((s) => (
++          <SummaryCard key={s.type} summary={s} theme={resolvedTheme} now={now} />
++        ))}
++      </div>
++      {view === 'cards'
++        ? renderCards(entries)
++        : summaries.map((s) => (
++            <section key={s.type} className={styles.group}>
++              <h3 className={styles.groupTitle}>
++                {getTypeLabel(t, s.type)} <span className={styles.muted}>{s.rows.length}</span>
++              </h3>
++              {s.rows.map((row) => (
++                <div key={row.entry.file.name} className={styles.ledgerRow}>
++                  <div className={styles.nameCell}>
++                    <div className={styles.fileName}>{getQuotaDisplayName(row.entry.file)}</div>
++                    <PlanLine row={row} now={now} />
++                  </div>
++                  <div className={styles.windowCells}>
++                    {row.status === 'success' ? (
++                      <>
++                        {s.totals.map((c) => {
++                          const w = row.windows.find((x) => x.id === c.id);
++                          return w ? (
++                            <WindowCell
++                              key={c.id}
++                              label={w.label}
++                              left={w.left}
++                              resetAtMs={w.resetAtMs}
++                              now={now}
++                            />
++                          ) : (
++                            <div key={c.id} />
++                          );
++                        })}
++                        <ExtraCell row={row} now={now} />
++                      </>
++                    ) : (
++                      <RowState
++                        row={row}
++                        onRefresh={() => onRefresh(row.entry)}
++                        canRefresh={canRefresh}
++                      />
++                    )}
++                  </div>
++                  <Actions
++                    row={row}
++                    onRefresh={() => onRefresh(row.entry)}
++                    canRefresh={canRefresh}
++                  />
++                </div>
++              ))}
++            </section>
++          ))}
++    </div>
++  );
++}
++
++/* ---------- Variant B: provider panels, totals in the column heads ---------- */
++
++function VariantB(props: QuotaPrototypeProps) {
++  const { entries, getQuota, resolvedTheme, canRefresh, onRefresh } = props;
++  const { t } = useTranslation();
++  const now = useNow();
++  const summaries = useSummaries(entries, getQuota);
++  return (
++    <div className={styles.root}>
++      {summaries.map((s) => {
++        const cols = s.totals;
++        const hasExtra = s.rows.some((r) => r.manualResets || r.credits);
++        const grid = {
++          gridTemplateColumns: `minmax(220px, 1.4fr) repeat(${cols.length + (hasExtra ? 1 : 0)}, minmax(150px, 1fr)) auto`,
++        };
++        return (
++          <section key={s.type} className={styles.panel}>
++            <div className={styles.panelGrid} style={grid}>
++              <div className={styles.panelHeadCell}>
++                <div className={styles.summaryHead}>
++                  <ProviderIcon type={s.type} theme={resolvedTheme} />
++                  <strong>{getTypeLabel(t, s.type)}</strong>
++                </div>
++                <div className={styles.muted}>
++                  {s.rows.length} credential{s.rows.length === 1 ? '' : 's'} · total left
++                </div>
++              </div>
++              {cols.map((c) => (
++                <div
++                  key={c.id}
++                  className={`${styles.panelHeadCell} ${c === s.headline ? styles.headlineCol : ''}`}
++                >
++                  <div className={styles.windowHead}>
++                    <span className={styles.windowLabel}>{c.label}</span>
++                  </div>
++                  <div className={styles.midNumber}>
++                    {pct(c.sumLeft)} <span className={styles.muted}>of {c.outOf}%</span>
++                  </div>
++                  <Segments values={c.segments} />
++                  <When atMs={c.soonestResetMs} now={now} />
++                </div>
++              ))}
++              {hasExtra && <div className={styles.panelHeadCell} />}
++              <div className={styles.panelHeadCell} />
++
++              {s.rows.map((row) => (
++                <div key={row.entry.file.name} className={styles.panelRow}>
++                  <div className={styles.nameCell}>
++                    <div className={styles.fileName}>{getQuotaDisplayName(row.entry.file)}</div>
++                    <PlanLine row={row} now={now} />
++                  </div>
++                  {row.status === 'success' ? (
++                    <>
++                      {cols.map((c) => {
++                        const w = row.windows.find((x) => x.id === c.id);
++                        return w ? (
++                          <WindowCell key={c.id} left={w.left} resetAtMs={w.resetAtMs} now={now} />
++                        ) : (
++                          <div key={c.id} className={styles.muted}>
++                            —
++                          </div>
++                        );
++                      })}
++                      {hasExtra && (
++                        <div>
++                          <ExtraCell row={row} now={now} />
++                        </div>
++                      )}
++                    </>
++                  ) : (
++                    <div style={{ gridColumn: `span ${cols.length + (hasExtra ? 1 : 0)}` }}>
++                      <RowState
++                        row={row}
++                        onRefresh={() => onRefresh(row.entry)}
++                        canRefresh={canRefresh}
++                      />
++                    </div>
++                  )}
++                  <Actions
++                    row={row}
++                    onRefresh={() => onRefresh(row.entry)}
++                    canRefresh={canRefresh}
++                  />
++                </div>
++              ))}
++            </div>
++          </section>
++        );
++      })}
++    </div>
++  );
++}
++
++/* ---------- Variant C: one queue across providers, expiring-first ---------- */
++
++function VariantC(props: QuotaPrototypeProps) {
++  const { entries, getQuota, resolvedTheme, canRefresh, onRefresh } = props;
++  const { t } = useTranslation();
++  const now = useNow();
++  const summaries = useSummaries(entries, getQuota);
++  const ranked = useMemo(() => {
++    const rows = summaries.flatMap((s) => s.rows).map((row) => ({ row, u: urgencyOf(row, now) }));
++    const rank = (x: (typeof rows)[number]) =>
++      x.row.status !== 'success' ? 3 : !x.u.usable ? 2 : x.u.urgency === null ? 1 : 0;
++    return rows.sort((a, b) => rank(a) - rank(b) || (b.u.urgency ?? 0) - (a.u.urgency ?? 0));
++  }, [summaries, now]);
++
++  let position = 0;
++  return (
++    <div className={styles.root}>
++      <div className={styles.strip}>
++        {summaries.map((s) => (
++          <div key={s.type} className={styles.stripItem}>
++            <ProviderIcon type={s.type} theme={resolvedTheme} />
++            <span>{getTypeLabel(t, s.type)}</span>
++            {s.headline && (
++              <>
++                <strong>{pct(s.headline.sumLeft)}</strong>
++                <span className={styles.muted}>
++                  of {s.headline.outOf}% · {s.headline.label}
++                </span>
++                <div className={styles.stripBar}>
++                  <Segments values={s.headline.segments} />
++                </div>
++              </>
++            )}
++          </div>
++        ))}
++      </div>
++      <p className={styles.muted}>
++        Order: usable credentials first, by urgency = % left in the longest window ÷ hours until it
++        resets (the map's expiring-first rule). The panel computes this; it is not the router's
++        pick.
++      </p>
++      <div className={styles.queue}>
++        {ranked.map(({ row, u }) => {
++          const usable = row.status === 'success' && u.usable;
++          if (usable) position += 1;
++          return (
++            <div
++              key={row.entry.file.name}
++              className={`${styles.queueRow} ${usable ? '' : styles.dimmed}`}
++            >
++              <div className={styles.rank}>{usable ? position : '–'}</div>
++              <ProviderIcon type={row.entry.type} theme={resolvedTheme} />
++              <div className={styles.nameCell}>
++                <div className={styles.fileName}>{getQuotaDisplayName(row.entry.file)}</div>
++                <PlanLine row={row} now={now} />
++              </div>
++              {row.status === 'success' && u.window ? (
++                <>
++                  <div className={styles.queueMain}>
++                    <WindowCell
++                      label={u.window.label}
++                      left={u.window.left}
++                      resetAtMs={u.window.resetAtMs}
++                      now={now}
++                    />
++                  </div>
++                  <div className={styles.queueUrgency}>
++                    <div className={styles.muted}>urgency</div>
++                    <strong>{u.urgency === null ? '--' : u.urgency.toFixed(2)}</strong>
++                    <div className={styles.small}>%/h</div>
++                  </div>
++                  <div className={styles.chips}>
++                    {u.blockedBy && (
++                      <span className={`${styles.chip} ${styles.chipBad}`}>
++                        blocked: {u.blockedBy.label} empty
++                      </span>
++                    )}
++                    {row.windows
++                      .filter((w) => w !== u.window)
++                      .map((w) => (
++                        <span key={w.id} className={`${styles.chip}`}>
++                          <span className={`${styles.dot} ${levelClass(w.left)}`} />
++                          {w.label} {pct(w.left)}
++                        </span>
++                      ))}
++                    {row.manualResets && (
++                      <span className={styles.chip}>{row.manualResets.count} manual resets</span>
++                    )}
++                  </div>
++                </>
++              ) : (
++                <div className={styles.queueMain}>
++                  <RowState
++                    row={row}
++                    onRefresh={() => onRefresh(row.entry)}
++                    canRefresh={canRefresh}
++                  />
++                </div>
++              )}
++              <Actions row={row} onRefresh={() => onRefresh(row.entry)} canRefresh={canRefresh} />
++            </div>
++          );
++        })}
++      </div>
++    </div>
++  );
++}
++
++export function QuotaPrototype(props: QuotaPrototypeProps) {
++  if (props.variant === 'B') return <VariantB {...props} />;
++  if (props.variant === 'C') return <VariantC {...props} />;
++  return <VariantA {...props} />;
++}
+diff --git a/src/features/quota/prototype/model.ts b/src/features/quota/prototype/model.ts
+new file mode 100644
+index 0000000..1696302
+--- /dev/null
++++ b/src/features/quota/prototype/model.ts
+@@ -0,0 +1,211 @@
++/**
++ * PROTOTYPE (throwaway): data model for the Quota Management layout prototype.
++ * Branch prototype/quota-ledger only. Answers bandoyer/CLIProxyAPI#30.
++ *
++ * Normalizes each credential's stock quota state into windows, then sums a
++ * provider's windows across its credentials for the summary cards.
++ */
++
++import type { TFunction } from 'i18next';
++import type { ClaudeQuotaState, CodexQuotaState, XaiQuotaState } from '@/types';
++import { normalizePlanType, parseIsoToMs, resolveResetMs } from '@/utils/quota';
++import type { QuotaFileEntry } from '../logic';
++import type { QuotaCardState } from '../providers';
++import type { QuotaProviderType } from '../providers/types';
++
++export interface ProtoWindow {
++  id: string;
++  label: string;
++  /** Percent left, 0..100; null when the reading has no value. */
++  left: number | null;
++  resetAtMs: number | null;
++  periodHours: number | null;
++}
++
++export interface ProtoRow {
++  entry: QuotaFileEntry;
++  quota: QuotaCardState | undefined;
++  status: QuotaCardState['status'];
++  windows: ProtoWindow[];
++  plan: string | null;
++  /** Codex subscription renewal instant. */
++  renewsAtMs: number | null;
++  manualResets: { count: number; firstExpiryMs: number | null } | null;
++  /** xAI monthly credits, in cents. */
++  credits: { usedCents: number | null; limitCents: number | null } | null;
++}
++
++export interface ProtoWindowTotal {
++  id: string;
++  label: string;
++  periodHours: number | null;
++  sumLeft: number | null;
++  /** 100 per credential that has this window. */
++  outOf: number;
++  /** One segment per credential, in row order. */
++  segments: (number | null)[];
++  soonestResetMs: number | null;
++}
++
++export interface ProtoProviderSummary {
++  type: QuotaProviderType;
++  rows: ProtoRow[];
++  totals: ProtoWindowTotal[];
++  headline: ProtoWindowTotal | null;
++}
++
++const leftFromUsed = (used: number | null | undefined): number | null =>
++  typeof used === 'number' && Number.isFinite(used) ? Math.max(0, 100 - used) : null;
++
++const codexPlanKey = (planType: string | null | undefined): string | null => {
++  const normalized = normalizePlanType(planType);
++  if (!normalized) return null;
++  if (normalized === 'pro') return 'codex_quota.plan_pro';
++  if (normalized === 'plus') return 'codex_quota.plan_plus';
++  if (normalized === 'team') return 'codex_quota.plan_team';
++  if (normalized === 'free') return 'codex_quota.plan_free';
++  return null;
++};
++
++export function buildRow(
++  entry: QuotaFileEntry,
++  quota: QuotaCardState | undefined,
++  t: TFunction
++): ProtoRow {
++  const row: ProtoRow = {
++    entry,
++    quota,
++    status: quota?.status ?? 'idle',
++    windows: [],
++    plan: null,
++    renewsAtMs: null,
++    manualResets: null,
++    credits: null,
++  };
++  if (!quota || quota.status !== 'success') return row;
++
++  if (entry.type === 'claude') {
++    const q = quota as unknown as ClaudeQuotaState;
++    row.windows = (q.windows ?? []).map((w) => ({
++      id: w.id,
++      label: w.labelKey ? t(w.labelKey) : w.label,
++      left: leftFromUsed(w.usedPercent),
++      resetAtMs: w.resetAtMs ?? null,
++      periodHours: w.periodHours ?? null,
++    }));
++    row.plan = q.planType ? t(`claude_quota.${q.planType}`) : null;
++  } else if (entry.type === 'codex') {
++    const q = quota as unknown as CodexQuotaState;
++    row.windows = (q.windows ?? []).map((w) => ({
++      id: w.id,
++      label: w.labelKey ? t(w.labelKey, w.labelParams as Record<string, string>) : w.label,
++      left: leftFromUsed(w.usedPercent),
++      resetAtMs: w.resetAtMs ?? null,
++      periodHours: w.periodHours ?? null,
++    }));
++    const key = codexPlanKey(q.planType);
++    row.plan = key ? t(key) : (q.planType ?? null);
++    row.renewsAtMs = resolveResetMs([q.subscriptionActiveUntil ?? null]);
++    const available = (q.rateLimitResetCredits ?? [])
++      .filter((c) => c.status === 'available')
++      .map((c) => parseIsoToMs(c.expiresAt))
++      .filter((ms): ms is number => ms !== null)
++      .sort((a, b) => a - b);
++    if (q.rateLimitResetCreditsAvailableCount != null) {
++      row.manualResets = {
++        count: q.rateLimitResetCreditsAvailableCount,
++        firstExpiryMs: available[0] ?? null,
++      };
++    }
++  } else if (entry.type === 'xai') {
++    const billing = (quota as unknown as XaiQuotaState).billing;
++    if (billing) {
++      row.windows = [
++        {
++          id: `xai:${billing.periodType}`,
++          label: billing.periodType === 'weekly' ? t('xai_quota.weekly_limit') : 'Monthly limit',
++          left: leftFromUsed(billing.usedPercent ?? billing.usagePercent),
++          resetAtMs: parseIsoToMs(billing.periodEnd ?? billing.billingPeriodEnd),
++          periodHours: billing.periodType === 'weekly' ? 168 : 720,
++        },
++      ];
++      row.plan = billing.planLabel ?? null;
++      row.credits = { usedCents: billing.usedCents, limitCents: billing.monthlyLimitCents };
++    }
++  }
++  return row;
++}
++
++export function summarize(type: QuotaProviderType, rows: ProtoRow[]): ProtoProviderSummary {
++  const order: string[] = [];
++  const byId = new Map<string, ProtoWindowTotal>();
++  rows.forEach((row) =>
++    row.windows.forEach((w) => {
++      if (!byId.has(w.id)) {
++        order.push(w.id);
++        byId.set(w.id, {
++          id: w.id,
++          label: w.label,
++          periodHours: w.periodHours,
++          sumLeft: null,
++          outOf: 0,
++          segments: [],
++          soonestResetMs: null,
++        });
++      }
++    })
++  );
++
++  const now = Date.now();
++  order.forEach((id) => {
++    const total = byId.get(id)!;
++    rows.forEach((row) => {
++      const w = row.windows.find((x) => x.id === id);
++      if (!w) return;
++      total.outOf += 100;
++      total.segments.push(w.left);
++      if (w?.left != null) total.sumLeft = (total.sumLeft ?? 0) + w.left;
++      if (w?.resetAtMs != null && w.resetAtMs > now) {
++        if (total.soonestResetMs === null || w.resetAtMs < total.soonestResetMs) {
++          total.soonestResetMs = w.resetAtMs;
++        }
++      }
++    });
++  });
++
++  // Shortest window first, as in Theo's rows; stable for equal lengths.
++  const totals = order
++    .map((id) => byId.get(id)!)
++    .sort((a, b) => (a.periodHours ?? Infinity) - (b.periodHours ?? Infinity));
++  // Headline: the longest window; among equally long ones, the one with the
++  // least left across the provider (the one that binds first). This reproduces
++  // Theo's "7-day Fable 5 409%" over "7-day limit 454%".
++  const longest = Math.max(0, ...totals.map((x) => x.periodHours ?? 0));
++  const headline =
++    totals
++      .filter((x) => (x.periodHours ?? 0) === longest)
++      .sort(
++        (a, b) =>
++          (a.sumLeft ?? Infinity) / (a.outOf || 1) - (b.sumLeft ?? Infinity) / (b.outOf || 1)
++      )[0] ?? null;
++
++  return { type, rows, totals, headline };
++}
++
++/**
++ * Expiring-first urgency from the map's routing rule: percent left in the
++ * longest window divided by hours to its reset. Usable only when no window is
++ * exhausted. The panel computes it for display; it is not the router's pick.
++ */
++export function urgencyOf(row: ProtoRow, now: number) {
++  if (row.windows.length === 0)
++    return { usable: false, urgency: null, window: null, blockedBy: null };
++  const blockedBy = row.windows.find((w) => w.left !== null && w.left <= 0) ?? null;
++  const longest = [...row.windows].sort(
++    (a, b) => (b.periodHours ?? 0) - (a.periodHours ?? 0) || (a.left ?? 101) - (b.left ?? 101)
++  )[0];
++  const hours =
++    longest.resetAtMs != null ? Math.max((longest.resetAtMs - now) / 3_600_000, 0.01) : null;
++  const urgency = longest.left != null && hours != null ? longest.left / hours : null;
++  return { usable: blockedBy === null, urgency, window: longest, blockedBy };
++}
+-- 
+2.55.0
+
+
+From 28cf1a3733e0edfb8f60fa99a99e404d6d7ea23f Mon Sep 17 00:00:00 2001
+From: Dan Boyer <bandoyer@gmail.com>
+Date: Mon, 5 Oct 2026 17:17:15 -0400
+Subject: [PATCH 2/3] PROTOTYPE: forward management API to the preview proxy;
+ fit ledger columns
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ src/features/quota/prototype/QuotaPrototype.module.scss | 6 +++---
+ vite.config.ts                                          | 8 ++++++++
+ 2 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/src/features/quota/prototype/QuotaPrototype.module.scss b/src/features/quota/prototype/QuotaPrototype.module.scss
+index 52322c9..ed0c090 100644
+--- a/src/features/quota/prototype/QuotaPrototype.module.scss
++++ b/src/features/quota/prototype/QuotaPrototype.module.scss
+@@ -139,8 +139,8 @@
+ 
+ .windowCells {
+   display: grid;
+-  grid-template-columns: repeat(4, minmax(150px, 1fr));
+-  gap: 24px;
++  grid-template-columns: repeat(4, minmax(0, 1fr));
++  gap: 18px;
+   align-items: start;
+ }
+ 
+@@ -277,7 +277,7 @@
+ 
+ .ledgerRow {
+   display: grid;
+-  grid-template-columns: minmax(240px, 1.2fr) 4fr auto;
++  grid-template-columns: minmax(200px, 1fr) minmax(0, 4fr) auto;
+   gap: 24px;
+   align-items: center;
+   padding: 16px 4px;
+diff --git a/vite.config.ts b/vite.config.ts
+index b5d0361..3276552 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -62,6 +62,14 @@ export default defineConfig({
+       }
+     }
+   },
++  // PROTOTYPE: forward the management API to the local preview proxy, so the
++  // default "Current URL" login works from the dev server.
++  server: {
++    proxy: {
++      '/v0': 'http://127.0.0.1:8317',
++      '/v8': 'http://127.0.0.1:8317',
++    },
++  },
+   build: {
+     target: 'es2020',
+     outDir: 'dist',
+-- 
+2.55.0
+
+
+From 9ec51ab38cfee9181663e27ae00f19e5c2311e70 Mon Sep 17 00:00:00 2001
+From: Dan Boyer <bandoyer@gmail.com>
+Date: Mon, 5 Oct 2026 17:23:00 -0400
+Subject: [PATCH 3/3] PROTOTYPE: variant D (A summary + B panels), renewal
+ dates for all providers
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../quota/prototype/QuotaPrototype.tsx        | 28 ++++++++++++++++++-
+ src/features/quota/prototype/model.ts         | 23 ++++++++++++++-
+ src/features/quota/providers/claude/data.ts   | 20 +++++++++----
+ src/types/quota.ts                            |  3 ++
+ 4 files changed, 67 insertions(+), 7 deletions(-)
+
+diff --git a/src/features/quota/prototype/QuotaPrototype.tsx b/src/features/quota/prototype/QuotaPrototype.tsx
+index df8c9ad..fa63613 100644
+--- a/src/features/quota/prototype/QuotaPrototype.tsx
++++ b/src/features/quota/prototype/QuotaPrototype.tsx
+@@ -30,6 +30,7 @@ export const PROTOTYPE_VARIANTS = [
+   { key: 'A', name: 'Ledger (Theo)' },
+   { key: 'B', name: 'Provider panels' },
+   { key: 'C', name: 'Expiring-first queue' },
++  { key: 'D', name: 'A summary + B panels' },
+ ] as const;
+ 
+ export interface QuotaPrototypeProps {
+@@ -117,8 +118,15 @@ function PlanLine({ row, now }: { row: ProtoRow; now: number }) {
+       {row.renewsAtMs !== null && (
+         <span className={styles.muted}>
+           {' '}
+-          · renews {formatInstantShort(row.renewsAtMs)} ·{' '}
++          · renews {row.renewsEstimated ? '~' : ''}
++          {formatInstantShort(row.renewsAtMs)} ·{' '}
+           {formatRelativeInstant(row.renewsAtMs, now, i18n.resolvedLanguage)}
++          {row.renewsEstimated && (
++            <span title="Estimated: monthly from the subscription start date. Claude's API has no renewal date.">
++              {' '}
++              (est.)
++            </span>
++          )}
+         </span>
+       )}
+     </div>
+@@ -613,8 +621,26 @@ function VariantC(props: QuotaPrototypeProps) {
+   );
+ }
+ 
++/* ---------- Variant D: A's summary cards over B's panels, no drop-down ---------- */
++
++function VariantD(props: QuotaPrototypeProps) {
++  const now = useNow();
++  const summaries = useSummaries(props.entries, props.getQuota);
++  return (
++    <div className={styles.root}>
++      <div className={styles.summaryRow}>
++        {summaries.map((s) => (
++          <SummaryCard key={s.type} summary={s} theme={props.resolvedTheme} now={now} />
++        ))}
++      </div>
++      <VariantB {...props} />
++    </div>
++  );
++}
++
+ export function QuotaPrototype(props: QuotaPrototypeProps) {
+   if (props.variant === 'B') return <VariantB {...props} />;
++  if (props.variant === 'D') return <VariantD {...props} />;
+   if (props.variant === 'C') return <VariantC {...props} />;
+   return <VariantA {...props} />;
+ }
+diff --git a/src/features/quota/prototype/model.ts b/src/features/quota/prototype/model.ts
+index 1696302..869d527 100644
+--- a/src/features/quota/prototype/model.ts
++++ b/src/features/quota/prototype/model.ts
+@@ -28,8 +28,10 @@ export interface ProtoRow {
+   status: QuotaCardState['status'];
+   windows: ProtoWindow[];
+   plan: string | null;
+-  /** Codex subscription renewal instant. */
++  /** Subscription renewal instant, for every provider that has one. */
+   renewsAtMs: number | null;
++  /** True when renewsAtMs is estimated (Claude: monthly from the start date). */
++  renewsEstimated: boolean;
+   manualResets: { count: number; firstExpiryMs: number | null } | null;
+   /** xAI monthly credits, in cents. */
+   credits: { usedCents: number | null; limitCents: number | null } | null;
+@@ -67,6 +69,19 @@ const codexPlanKey = (planType: string | null | undefined): string | null => {
+   return null;
+ };
+ 
++/** Next monthly anniversary of a subscription start, after now. */
++function nextMonthlyAnniversary(startMs: number | null): number | null {
++  if (startMs === null) return null;
++  const now = Date.now();
++  const start = new Date(startMs);
++  for (let months = 1; months < 1200; months++) {
++    const d = new Date(start);
++    d.setMonth(start.getMonth() + months);
++    if (d.getTime() > now) return d.getTime();
++  }
++  return null;
++}
++
+ export function buildRow(
+   entry: QuotaFileEntry,
+   quota: QuotaCardState | undefined,
+@@ -79,6 +94,7 @@ export function buildRow(
+     windows: [],
+     plan: null,
+     renewsAtMs: null,
++    renewsEstimated: false,
+     manualResets: null,
+     credits: null,
+   };
+@@ -94,6 +110,10 @@ export function buildRow(
+       periodHours: w.periodHours ?? null,
+     }));
+     row.plan = q.planType ? t(`claude_quota.${q.planType}`) : null;
++    const tier = q.rateLimitTier?.match(/max_(\d+x)$/)?.[1];
++    if (tier && q.planType === 'plan_max') row.plan = `${row.plan} ${tier}`;
++    row.renewsAtMs = nextMonthlyAnniversary(parseIsoToMs(q.subscriptionCreatedAt ?? undefined));
++    row.renewsEstimated = row.renewsAtMs !== null;
+   } else if (entry.type === 'codex') {
+     const q = quota as unknown as CodexQuotaState;
+     row.windows = (q.windows ?? []).map((w) => ({
+@@ -130,6 +150,7 @@ export function buildRow(
+         },
+       ];
+       row.plan = billing.planLabel ?? null;
++      row.renewsAtMs = parseIsoToMs(billing.billingPeriodEnd ?? billing.periodEnd);
+       row.credits = { usedCents: billing.usedCents, limitCents: billing.monthlyLimitCents };
+     }
+   }
+diff --git a/src/features/quota/providers/claude/data.ts b/src/features/quota/providers/claude/data.ts
+index 6fad469..b387de4 100644
+--- a/src/features/quota/providers/claude/data.ts
++++ b/src/features/quota/providers/claude/data.ts
+@@ -35,6 +35,9 @@ export type ClaudeQuotaData = {
+   windows: ClaudeQuotaWindow[];
+   extraUsage?: ClaudeExtraUsage | null;
+   planType?: string | null;
++  /** PROTOTYPE: for the renewal estimate and the "Max 20x" label. */
++  subscriptionCreatedAt?: string | null;
++  rateLimitTier?: string | null;
+ };
+ 
+ const findFableUsageLimit = (payload: ClaudeUsagePayload) => {
+@@ -192,16 +195,21 @@ const fetchClaudeQuota = async (file: AuthFileItem, t: TFunction): Promise<Claud
+   }
+ 
+   const windows = buildClaudeQuotaWindows(payload, t);
+-  const planType =
++  const profile =
+     profileResult.status === 'fulfilled' &&
+     profileResult.value.statusCode >= 200 &&
+     profileResult.value.statusCode < 300
+-      ? resolveClaudePlanType(
+-          parseClaudeProfilePayload(profileResult.value.body ?? profileResult.value.bodyText)
+-        )
++      ? parseClaudeProfilePayload(profileResult.value.body ?? profileResult.value.bodyText)
+       : null;
++  const planType = resolveClaudePlanType(profile);
+ 
+-  return { windows, extraUsage: payload.extra_usage, planType };
++  return {
++    windows,
++    extraUsage: payload.extra_usage,
++    planType,
++    subscriptionCreatedAt: profile?.organization?.subscription_created_at ?? null,
++    rateLimitTier: profile?.organization?.rate_limit_tier ?? null,
++  };
+ };
+ 
+ export const CLAUDE_CONFIG: QuotaProviderData<ClaudeQuotaState, ClaudeQuotaData> = {
+@@ -217,6 +225,8 @@ export const CLAUDE_CONFIG: QuotaProviderData<ClaudeQuotaState, ClaudeQuotaData>
+     windows: data.windows,
+     extraUsage: data.extraUsage,
+     planType: data.planType,
++    subscriptionCreatedAt: data.subscriptionCreatedAt,
++    rateLimitTier: data.rateLimitTier,
+   }),
+   buildErrorState: (message, status) => ({
+     status: 'error',
+diff --git a/src/types/quota.ts b/src/types/quota.ts
+index 4d0a2dc..a559c5c 100644
+--- a/src/types/quota.ts
++++ b/src/types/quota.ts
+@@ -178,6 +178,9 @@ export interface ClaudeQuotaState {
+   windows: ClaudeQuotaWindow[];
+   extraUsage?: ClaudeExtraUsage | null;
+   planType?: string | null;
++  /** PROTOTYPE: for the renewal estimate and the "Max 20x" label. */
++  subscriptionCreatedAt?: string | null;
++  rateLimitTier?: string | null;
+   error?: string;
+   errorStatus?: number;
+ }
+-- 
+2.55.0
+
