@@ -77,9 +77,11 @@ type Reading struct {
 	Source Source
 }
 
-// Exhausted reports whether the window has no share left.
+// Exhausted reports whether the window has no share left. A credit balance is
+// never an exhausted window: a credential without credits can still serve
+// from its quota windows. Its ShareLeft is 1 while credits are left, else 0.
 func (r Reading) Exhausted() bool {
-	return r.ShareLeft <= 0
+	return r.Kind != KindCredit && r.ShareLeft <= 0
 }
 
 // AppliesToModel reports whether the reading counts for a request on model.
@@ -103,6 +105,8 @@ func FromHeaderSignals(provider string, signals map[string]string, learnedAt tim
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "claude":
 		return ParseClaudeHeaderSignals(signals, learnedAt)
+	case "codex":
+		return ParseCodexHeaderSignals(signals, learnedAt)
 	default:
 		return nil
 	}
