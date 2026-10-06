@@ -26,6 +26,16 @@ _Avoid_: signal, watermark, snapshot
 The moment a quota window ends and the credential's usage in that window returns to zero.
 _Avoid_: session end, renewal
 
+### Clients
+
+**Client**:
+A program that sends requests to the proxy on Dan's behalf, such as T3 Code, the Claude Code CLI, or the Codex CLI.
+_Avoid_: app, frontend, consumer
+
+**Client key**:
+The secret a client presents to the proxy to be let in. It identifies the client, not a provider, and is never sent upstream.
+_Avoid_: API key, token, credential
+
 ### Routing
 
 **Thread**:
