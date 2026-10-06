@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 
@@ -1081,8 +1082,49 @@ func claudeCodeLocalDate(now time.Time) string {
 	return fmt.Sprintf("%04d-%02d-%02d", year, int(month), day)
 }
 
+// claudeCodeNowMu protects claudeCodeNow, the clock behind the injected date
+// block, so tests can move it across midnight without wall-clock sleeps.
+var (
+	claudeCodeNowMu sync.RWMutex
+	claudeCodeNow   = time.Now
+)
+
+func nowClaudeCode() time.Time {
+	claudeCodeNowMu.RLock()
+	fn := claudeCodeNow
+	claudeCodeNowMu.RUnlock()
+	if fn != nil {
+		return fn()
+	}
+	return time.Now()
+}
+
+func setClaudeCodeNowForTest(fn func() time.Time) func() {
+	claudeCodeNowMu.Lock()
+	orig := claudeCodeNow
+	claudeCodeNow = fn
+	claudeCodeNowMu.Unlock()
+	return func() {
+		claudeCodeNowMu.Lock()
+		claudeCodeNow = orig
+		claudeCodeNowMu.Unlock()
+	}
+}
+
+// claudeThreadDates pins the injected date block per thread. It is shared by
+// every Claude executor so pins survive executor re-registration.
+var claudeThreadDates = helps.NewClaudeThreadDates()
+
+// claudeCodeThreadTime returns the instant whose date the cloaked date block
+// carries. Requests with a thread identifier (the canonical session ID the
+// affinity resolver reads, carried in ctx by helps.EnsureSessionContext) repeat
+// the date of the thread's first request; others get the current date.
+func claudeCodeThreadTime(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) time.Time {
+	return claudeThreadDates.Pin(util.SessionIDFromContext(ctx), claudeCodeCurrentTime(cfg, auth), helps.ClaudeThreadDateTTL(cfg))
+}
+
 func claudeCodeCurrentTime(cfg *config.Config, auth *cliproxyauth.Auth) time.Time {
-	return time.Now().In(claudeCodeTimezone(cfg, auth))
+	return nowClaudeCode().In(claudeCodeTimezone(cfg, auth))
 }
 
 func claudeCodeTimezone(cfg *config.Config, auth *cliproxyauth.Auth) *time.Location {
@@ -1447,7 +1489,7 @@ func applyCloakingInternal(
 		billingVersion,
 		"cli",
 		workload,
-		claudeCodeCurrentTime(cfg, auth),
+		claudeCodeThreadTime(ctx, cfg, auth),
 		isSubagent,
 		prevReq,
 		promptID,
@@ -1612,6 +1654,17 @@ func upgradeClaudeCacheControlTTL(payload []byte, ttl string) []byte {
 
 	forEachClaudeCacheControlBlock(payload, upgrade)
 	return payload
+}
+
+// claudePassthroughUpgradesCacheTTL reports whether a passthrough request (confirmed
+// native Claude Code on a Claude OAuth credential) gets the 1h TTL safety net.
+// Claude Code only sends 1h markers when the client sets ENABLE_PROMPT_CACHING_1H,
+// so a proxied main thread without it would silently pay 5m rewrites. The rule
+// matches the cloaked path: main-thread requests only, while subagents keep the
+// client's choice and probe and helper requests are left alone. The caller still
+// runs upgradeClaudeCacheControlTTL, so an explicit client ttl is never changed.
+func claudePassthroughUpgradesCacheTTL(confirmedClaudeCode, oauthCredential, isSubagent, isProbeOrHelper, helperProfile bool) bool {
+	return confirmedClaudeCode && oauthCredential && !isSubagent && !isProbeOrHelper && !helperProfile
 }
 
 // stripClaudeCacheControlTTL removes any ttl field from cache_control blocks in payload,

@@ -1549,6 +1549,12 @@ type UsageDetail struct {
 	CacheReadTokens int64
 	// CacheCreationTokens is the cache creation token count.
 	CacheCreationTokens int64
+	// CacheCreation5mTokens is the part of CacheCreationTokens written with the
+	// 5-minute cache TTL, or zero when the upstream does not report the split.
+	CacheCreation5mTokens int64
+	// CacheCreation1hTokens is the part of CacheCreationTokens written with the
+	// 1-hour cache TTL, or zero when the upstream does not report the split.
+	CacheCreation1hTokens int64
 	// TotalTokens is the total token count.
 	TotalTokens int64
 }
