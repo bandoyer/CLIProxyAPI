@@ -234,9 +234,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// claude-code-cli fingerprint profiles emit extended-cache-ttl and must use the same 1h pool.
 	// In native Claude Code, subagents default to 5m unless 1h is explicitly configured;
 	// probes omit both 1h cache and extended-cache-ttl.
+	// Passthrough requests get the same upgrade as a safety net for clients that
+	// don't set ENABLE_PROMPT_CACHING_1H (see claudePassthroughUpgradesCacheTTL).
 	isSubagent := helps.IsClaudeSubagentRequest(incomingHeaders, body)
 	subagent1h := isSubagent && helps.ClaudeSubagentRequests1h(incomingHeaders, body)
-	if cpaOwnsCacheControl && fp.ProfileClaudeCodeCLI && (!isSubagent || subagent1h) && !isProbeOrHelper {
+	cloakedUpgrade := cpaOwnsCacheControl && fp.ProfileClaudeCodeCLI && (!isSubagent || subagent1h) && !isProbeOrHelper
+	passthroughUpgrade := claudePassthroughUpgradesCacheTTL(confirmedClaudeCode, fp.AuthIsOAuthToken, isSubagent, isProbeOrHelper, claudeCodeDetection.HelperProfile)
+	if cloakedUpgrade || passthroughUpgrade {
 		body = upgradeClaudeCacheControlTTL(body, claudeCacheControlTTL1h)
 	} else if isProbeOrHelper || (isSubagent && !subagent1h) {
 		body = stripClaudeCacheControlTTL(body)

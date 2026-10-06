@@ -1170,6 +1170,9 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		CachedTokens:        cacheReadTokens,
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
+		// The TTL split is informational; CacheCreationTokens stays the total.
+		CacheCreation5mTokens: usageNode.Get("cache_creation.ephemeral_5m_input_tokens").Int(),
+		CacheCreation1hTokens: usageNode.Get("cache_creation.ephemeral_1h_input_tokens").Int(),
 	}
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens

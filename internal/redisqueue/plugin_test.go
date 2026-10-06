@@ -206,6 +206,54 @@ func TestUsageQueuePluginPreservesLegacyCachedOnlyUsage(t *testing.T) {
 	})
 }
 
+func TestUsageQueuePluginPayloadIncludesCacheWriteSplit(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "claude",
+			Model:    "claude-opus-5",
+			Detail: coreusage.Detail{
+				InputTokens:           10,
+				OutputTokens:          20,
+				CacheCreationTokens:   1500,
+				CacheCreation5mTokens: 500,
+				CacheCreation1hTokens: 1000,
+				TotalTokens:           1530,
+			},
+		})
+
+		tokens := requireTokensPayload(t, popSinglePayload(t))
+		requireIntField(t, tokens, "cache_creation_tokens", 1500)
+		requireIntField(t, tokens, "cache_creation_5m_tokens", 500)
+		requireIntField(t, tokens, "cache_creation_1h_tokens", 1000)
+	})
+}
+
+func TestUsageQueuePluginPayloadReportsZeroCacheWriteSplitWhenAbsent(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "claude",
+			Model:    "claude-opus-5",
+			Detail: coreusage.Detail{
+				InputTokens:         10,
+				OutputTokens:        20,
+				CacheCreationTokens: 1500,
+				TotalTokens:         1530,
+			},
+		})
+
+		tokens := requireTokensPayload(t, popSinglePayload(t))
+		requireIntField(t, tokens, "cache_creation_tokens", 1500)
+		requireIntField(t, tokens, "cache_creation_5m_tokens", 0)
+		requireIntField(t, tokens, "cache_creation_1h_tokens", 0)
+	})
+}
+
 func TestUsageQueuePluginEmitsSingleCanonicalAutoTier(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := coreusage.WithServiceTier(context.Background(), coreusage.AutoServiceTier)
