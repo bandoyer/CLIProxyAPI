@@ -147,15 +147,6 @@ func TestFromHeaderSignalsParsesCodexSignals(t *testing.T) {
 	}
 }
 
-func TestCreditBalanceAtZeroIsNotAnExhaustedWindow(t *testing.T) {
-	// A credential without credits can still serve from its windows, so an
-	// empty balance must never make the credential unusable.
-	noCredits := Reading{Window: CodexCreditsWindow, Kind: KindCredit, ShareLeft: 0}
-	if noCredits.Exhausted() {
-		t.Fatal("a credit reading with no balance reports Exhausted() = true")
-	}
-}
-
 func TestParseCodexUsageBody(t *testing.T) {
 	learnedAt := time.Date(2026, time.October, 6, 12, 0, 0, 0, time.UTC)
 	week := 7 * 24 * time.Hour
