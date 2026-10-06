@@ -26,7 +26,7 @@ func TestBindingEndLogRecordsThreadCredentialAndReasonForAnExhaustedWindow(t *te
 	recordSevenDay(manager, clock, bound, 0.40, 3*time.Hour)
 	recordSevenDay(manager, clock, other, 0.90, 4*24*time.Hour)
 	executeClaudeThread(t, manager, "thread-1")
-	recordWindow(manager, clock, bound, exhaustedFiveHourWindow(clock, 2*time.Hour))
+	recordQuotaReading(manager, clock, bound, exhaustedFiveHourWindow(clock, 2*time.Hour))
 
 	hook := captureInfoLogs(t)
 	if got := executeClaudeThread(t, manager, "thread-1"); got != other {

@@ -53,7 +53,7 @@ func (c *servedCounter) get(id string) int {
 	return c.counts[id]
 }
 
-func recordWindow(manager *Manager, clock *affinityTestClock, credentialID string, reading quotareading.Reading) {
+func recordQuotaReading(manager *Manager, clock *affinityTestClock, credentialID string, reading quotareading.Reading) {
 	reading.LearnedAt = clock.Now()
 	reading.Source = quotareading.SourcePoll
 	manager.QuotaReadings().Record(credentialID, reading)
@@ -104,7 +104,7 @@ func TestBoundThreadMovesWhenAQuotaReadingShowsAnExhaustedWindow(t *testing.T) {
 				t.Fatalf("first request: credential = %s, want %s", got, bound)
 			}
 			clock.Advance(time.Minute)
-			recordWindow(manager, clock, bound, tc.reading(clock))
+			recordQuotaReading(manager, clock, bound, tc.reading(clock))
 
 			if got := executeClaudeThread(t, manager, "thread-1"); got != other {
 				t.Fatalf("next request: credential = %s, want the thread moved to %s", got, other)
@@ -156,7 +156,7 @@ func TestQuotaExceededMarkClearsAtTheWindowsResetTime(t *testing.T) {
 	manager, clock, _ := newQuotaMarkManager(t, exhausted, other)
 	recordSevenDay(manager, clock, exhausted, 0.40, 3*time.Hour)
 	recordSevenDay(manager, clock, other, 0.90, 4*24*time.Hour)
-	recordWindow(manager, clock, exhausted, exhaustedFiveHourWindow(clock, time.Hour))
+	recordQuotaReading(manager, clock, exhausted, exhaustedFiveHourWindow(clock, time.Hour))
 
 	if got := executeClaudeThread(t, manager, "before-reset"); got != other {
 		t.Fatalf("new thread before the reset: credential = %s, want %s", got, other)
@@ -218,7 +218,7 @@ func TestCredentialKeepsItsThreadsWhenNoWindowIsExhausted(t *testing.T) {
 				t.Fatalf("first request: credential = %s, want %s", got, bound)
 			}
 			clock.Advance(time.Minute)
-			recordWindow(manager, clock, bound, tc.reading(clock))
+			recordQuotaReading(manager, clock, bound, tc.reading(clock))
 
 			if got := executeClaudeThread(t, manager, "thread-1"); got != bound {
 				t.Fatalf("next request: credential = %s, want the binding kept on %s", got, bound)
@@ -242,15 +242,15 @@ func TestExhaustedWindowDoesNotMarkACredentialWithCreditLeft(t *testing.T) {
 		{
 			name: "credit reading before the exhausted window",
 			record: func(manager *Manager, clock *affinityTestClock, id string) {
-				recordWindow(manager, clock, id, creditLeft(0.5))
-				recordWindow(manager, clock, id, exhaustedFiveHourWindow(clock, 2*time.Hour))
+				recordQuotaReading(manager, clock, id, creditLeft(0.5))
+				recordQuotaReading(manager, clock, id, exhaustedFiveHourWindow(clock, 2*time.Hour))
 			},
 		},
 		{
 			name: "credit reading after the exhausted window",
 			record: func(manager *Manager, clock *affinityTestClock, id string) {
-				recordWindow(manager, clock, id, exhaustedFiveHourWindow(clock, 2*time.Hour))
-				recordWindow(manager, clock, id, creditLeft(0.5))
+				recordQuotaReading(manager, clock, id, exhaustedFiveHourWindow(clock, 2*time.Hour))
+				recordQuotaReading(manager, clock, id, creditLeft(0.5))
 			},
 		},
 	}
@@ -296,7 +296,7 @@ func TestExhaustedPerModelWindowMovesOnlyThatModelsThreads(t *testing.T) {
 		}
 	}
 	clock.Advance(time.Minute)
-	recordWindow(manager, clock, bound, quotareading.Reading{
+	recordQuotaReading(manager, clock, bound, quotareading.Reading{
 		Window:    "seven_day_opus",
 		Kind:      quotareading.KindPerModel,
 		Model:     "qm-opus",
@@ -318,11 +318,11 @@ func TestExhaustedWindowMarksACredentialWhoseCreditIsUsedUp(t *testing.T) {
 	manager, clock, _ := newQuotaMarkManager(t, bound, other)
 	recordSevenDay(manager, clock, bound, 0.40, 3*time.Hour)
 	recordSevenDay(manager, clock, other, 0.90, 4*24*time.Hour)
-	recordWindow(manager, clock, bound, creditLeft(0.5))
-	recordWindow(manager, clock, bound, exhaustedFiveHourWindow(clock, 2*time.Hour))
+	recordQuotaReading(manager, clock, bound, creditLeft(0.5))
+	recordQuotaReading(manager, clock, bound, exhaustedFiveHourWindow(clock, 2*time.Hour))
 
 	clock.Advance(time.Minute)
-	recordWindow(manager, clock, bound, creditLeft(0))
+	recordQuotaReading(manager, clock, bound, creditLeft(0))
 
 	if got := executeClaudeThread(t, manager, "thread-1"); got != other {
 		t.Fatalf("credential = %s, want %s (the other credential's window and credit are both used up)", got, other)
