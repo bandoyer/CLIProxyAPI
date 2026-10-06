@@ -2411,6 +2411,42 @@ func TestUsageAdapterNormalizesOmittedGenerateToTrue(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterPropagatesCacheWriteSplit(t *testing.T) {
+	var gotDetail pluginapi.UsageDetail
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotDetail = record.Detail
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-cache-write-split",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-cache-write-split",
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-opus-5",
+		Detail: coreusage.Detail{
+			CacheCreationTokens:   1500,
+			CacheCreation5mTokens: 500,
+			CacheCreation1hTokens: 1000,
+		},
+	})
+	if gotDetail.CacheCreationTokens != 1500 {
+		t.Fatalf("plugin CacheCreationTokens = %d, want 1500", gotDetail.CacheCreationTokens)
+	}
+	if gotDetail.CacheCreation5mTokens != 500 {
+		t.Fatalf("plugin CacheCreation5mTokens = %d, want 500", gotDetail.CacheCreation5mTokens)
+	}
+	if gotDetail.CacheCreation1hTokens != 1000 {
+		t.Fatalf("plugin CacheCreation1hTokens = %d, want 1000", gotDetail.CacheCreation1hTokens)
+	}
+}
+
 func TestUsageAdapterPropagatesBaseURL(t *testing.T) {
 	var gotBaseURL string
 	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {

@@ -4334,6 +4334,42 @@ func TestWebsocketUpstreamSupportsIncrementalInputForModel(t *testing.T) {
 	}
 }
 
+func TestWebsocketUpstreamSupportsIncrementalInputForCodexCredentialWithoutFlag(t *testing.T) {
+	tests := []struct {
+		name     string
+		model    string
+		metadata map[string]any
+		want     bool
+	}{
+		{name: "no flag", model: "codex-default-ws-model", metadata: map[string]any{"type": "codex", "access_token": "tok"}, want: true},
+		{name: "websockets false", model: "codex-off-ws-model", metadata: map[string]any{"type": "codex", "access_token": "tok", "websockets": false}, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := coreauth.NewManager(nil, nil, nil)
+			auth := &coreauth.Auth{
+				ID:       "auth-codex-" + tc.model,
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Metadata: tc.metadata,
+			}
+			if _, err := manager.Register(context.Background(), auth); err != nil {
+				t.Fatalf("Register auth: %v", err)
+			}
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: tc.model}})
+			t.Cleanup(func() {
+				registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+			})
+
+			base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+			h := NewOpenAIResponsesAPIHandler(base)
+			if got := h.websocketUpstreamSupportsIncrementalInputForModel(tc.model); got != tc.want {
+				t.Fatalf("websocketUpstreamSupportsIncrementalInputForModel() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWebsocketUpstreamSupportsIncrementalInputForXAI(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	auth := &coreauth.Auth{
