@@ -622,13 +622,16 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 
 // availableAuthsForSelector reports the candidates handed to priority-scoped consumers such as
 // the plugin scheduler, plus the candidates handed to the configured selector. Both are equal
-// unless session affinity or an across-priorities scheduler is active, in which case the selector
-// or scheduler additionally receives lower priority tiers.
+// unless session affinity, a selector that keeps the priority tier itself, or an across-priorities
+// scheduler is active, in which case the selector or scheduler additionally receives lower
+// priority tiers.
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
+	_, ranksTiers := selector.(tierRankingSelector)
+	selectorAcross := sessionAffinity || ranksTiers
 	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()
 
-	if !sessionAffinity && !schedulerAcross {
+	if !selectorAcross && !schedulerAcross {
 		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
 		if err != nil {
 			return nil, nil, err
@@ -651,7 +654,7 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 		priorityAuths = highestPriorityAuths(allAuths)
 	}
 
-	if sessionAffinity {
+	if selectorAcross {
 		selectorAuths = allAuths
 	} else {
 		selectorAuths = highestPriorityAuths(allAuths)
