@@ -65,6 +65,92 @@ func TestExpiringFirstEveryCredentialExhaustedReturnsQuotaCooldown(t *testing.T)
 	}
 }
 
+// recordCredit gives a credential a credit balance reading, which has no reset.
+func recordCredit(manager *Manager, clock *affinityTestClock, credentialID string, shareLeft float64) {
+	manager.QuotaReadings().Record(credentialID, quotareading.Reading{
+		Window:    "extra_usage",
+		Kind:      quotareading.KindCredit,
+		ShareLeft: shareLeft,
+		LearnedAt: clock.Now(),
+		Source:    quotareading.SourcePoll,
+	})
+}
+
+func TestExpiringFirstOrderInsideTierIsKnownUrgencyThenNoDataThenCreditOnly(t *testing.T) {
+	clock := newAffinityTestClock()
+	// IDs sort opposite to the expected order, so ID order cannot pass.
+	creditOnly, noData, known := "ef-1-"+t.Name(), "ef-2-"+t.Name(), "ef-3-"+t.Name()
+	manager := newExpiringFirstManager(t, clock, creditOnly, noData, known)
+	// A full credit balance never sets urgency.
+	recordCredit(manager, clock, creditOnly, 1)
+	recordSevenDay(manager, clock, known, 0.10, 6*24*time.Hour)
+
+	hook := captureInfoLogs(t)
+	if got := executeClaudeThread(t, manager, "thread-1"); got != known {
+		t.Fatalf("thread-1: credential = %s, want %s with a known urgency", got, known)
+	}
+
+	recordGating(manager, clock, known, 0, time.Hour)
+	if got := executeClaudeThread(t, manager, "thread-2"); got != noData {
+		t.Fatalf("thread-2: credential = %s, want %s with no reading before the credit-only %s", got, noData, creditOnly)
+	}
+
+	recordSevenDay(manager, clock, noData, 0, 2*24*time.Hour)
+	if got := executeClaudeThread(t, manager, "thread-3"); got != creditOnly {
+		t.Fatalf("thread-3: credential = %s, want the credit-only %s last", got, creditOnly)
+	}
+
+	lines := expiringFirstPickLines(hook)
+	want := "expiring-first pick | credential=" + creditOnly + " urgency=no_data reason=credit_only thread=header:thread-3"
+	if len(lines) != 3 || !strings.HasPrefix(lines[2], want) {
+		t.Fatalf("pick log lines = %q, want the third with prefix %q", lines, want)
+	}
+}
+
+func TestExpiringFirstExhaustedSubscriptionWithCreditsLeftServesFromCreditsLast(t *testing.T) {
+	clock := newAffinityTestClock()
+	credits, subscription := "ef-1-"+t.Name(), "ef-2-"+t.Name()
+	manager := newExpiringFirstManager(t, clock, credits, subscription)
+	// The credits credential's 7-day window is used up for two days, but it
+	// can still serve from its extra usage balance.
+	recordSevenDay(manager, clock, credits, 0, 2*24*time.Hour)
+	recordCredit(manager, clock, credits, 0.5)
+	recordSevenDay(manager, clock, subscription, 0.95, 6*24*time.Hour)
+
+	if got := executeClaudeThread(t, manager, "thread-1"); got != subscription {
+		t.Fatalf("thread-1: credential = %s, want subscription quota %s before credits", got, subscription)
+	}
+
+	recordGating(manager, clock, subscription, 0, time.Hour)
+	if got := executeClaudeThread(t, manager, "thread-2"); got != credits {
+		t.Fatalf("thread-2: credential = %s, want %s serving from credits", got, credits)
+	}
+
+	// With the balance spent too, nothing can serve until the 5-hour reset.
+	recordCredit(manager, clock, credits, 0)
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"thread-3"}}, Metadata: map[string]any{}}
+	_, errExecute := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: expiringFirstTestModel}, opts)
+	var cooldown *modelCooldownError
+	if !errors.As(errExecute, &cooldown) || cooldown.resetIn != time.Hour {
+		t.Fatalf("execute error = %v, want a model cooldown error until the 5-hour reset in 1h", errExecute)
+	}
+}
+
+func TestExpiringFirstCreditOnlyCredentialsAreUsedInTurn(t *testing.T) {
+	clock := newAffinityTestClock()
+	first, second := "ef-1-"+t.Name(), "ef-2-"+t.Name()
+	manager := newExpiringFirstManager(t, clock, first, second)
+	recordCredit(manager, clock, first, 0.2)
+	recordCredit(manager, clock, second, 0.9)
+
+	for i, want := range []string{first, second, first} {
+		thread := "thread-" + string(rune('a'+i))
+		if got := executeClaudeThread(t, manager, thread); got != want {
+			t.Fatalf("%s: credential = %s, want %s (round-robin among credit-only credentials)", thread, got, want)
+		}
+	}
+}
+
 func TestExpiringFirstReadingWithPassedResetRanksAsFullWindow(t *testing.T) {
 	clock := newAffinityTestClock()
 	passed, fresh := "ef-1-"+t.Name(), "ef-2-"+t.Name()

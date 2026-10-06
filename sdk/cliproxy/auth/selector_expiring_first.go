@@ -54,23 +54,32 @@ func (s *ExpiringFirstSelector) now() time.Time {
 	return time.Now()
 }
 
-// Pick selects the most urgent usable credential.
+// Pick selects the most urgent usable credential. Credentials with an
+// exhausted quota window are dropped first. Inside the tier, credentials with
+// a known urgency come first, then credentials with no reading, then
+// credentials that can serve only from a credit balance.
 func (s *ExpiringFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	now := s.now()
 	available, errAvailable := getSelectorAvailableAuths(ctx, auths, provider, model, now)
 	if errAvailable != nil {
 		return nil, errAvailable
 	}
-	available, errUsable := s.dropExhausted(available, provider, model, now)
+	usable, creditOnly, errUsable := s.usableByQuota(available, provider, model, now)
 	if errUsable != nil {
 		return nil, errUsable
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
+	usable = preferCodexWebsocketAuths(ctx, provider, usable)
 
+	thread := expiringFirstThread(opts.Metadata)
 	var best *Auth
 	bestUrgency := 0.0
-	noData := make([]*Auth, 0, len(available))
-	for _, candidate := range available {
+	noData := make([]*Auth, 0, len(usable))
+	credits := make([]*Auth, 0, len(usable))
+	for _, candidate := range usable {
+		if creditOnly[candidate.ID] {
+			credits = append(credits, candidate)
+			continue
+		}
 		urgency, known := s.urgency(candidate.ID, model, now)
 		if !known {
 			noData = append(noData, candidate)
@@ -80,59 +89,103 @@ func (s *ExpiringFirstSelector) Pick(ctx context.Context, provider, model string
 			best, bestUrgency = candidate, urgency
 		}
 	}
-	if best != nil {
-		logExpiringFirstPick(ctx, best, bestUrgency, true, expiringFirstReasonMoreUrgent, expiringFirstThread(opts.Metadata), provider, model)
+	rotationKey := provider + ":" + canonicalModelKey(model)
+	switch {
+	case best != nil:
+		logExpiringFirstPick(ctx, best, bestUrgency, true, expiringFirstReasonMoreUrgent, thread, provider, model)
 		return best, nil
+	case len(noData) > 0:
+		picked := s.nextInTurn(expiringFirstReasonNoData+":"+rotationKey, noData)
+		logExpiringFirstPick(ctx, picked, 0, false, expiringFirstReasonNoData, thread, provider, model)
+		return picked, nil
+	default:
+		picked := s.nextInTurn(expiringFirstReasonCreditOnly+":"+rotationKey, credits)
+		logExpiringFirstPick(ctx, picked, 0, false, expiringFirstReasonCreditOnly, thread, provider, model)
+		return picked, nil
 	}
-	picked := s.nextNoData(provider+":"+canonicalModelKey(model), noData)
-	logExpiringFirstPick(ctx, picked, 0, false, expiringFirstReasonNoData, expiringFirstThread(opts.Metadata), provider, model)
-	return picked, nil
 }
 
-// dropExhausted removes credentials whose quota reading shows an exhausted
-// window that has not reset yet. When no credential is left, it returns a
-// quota cooldown error that lasts until the soonest such reset.
-func (s *ExpiringFirstSelector) dropExhausted(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+// quotaStanding is what a credential's quota reading says about its use.
+type quotaStanding int
+
+const (
+	// standingSubscription serves from subscription quota, ranked by urgency
+	// (or as no data when no ranking window is known).
+	standingSubscription quotaStanding = iota
+	// standingCreditOnly can serve only from a credit balance, so it ranks
+	// after every other usable credential: credits don't expire at a reset.
+	standingCreditOnly
+	// standingBlocked can't serve until its exhausted windows reset.
+	standingBlocked
+)
+
+// usableByQuota drops credentials whose quota reading blocks them and marks
+// the credit-only ones. When every credential is blocked, it returns a quota
+// cooldown error that lasts until the soonest reset that unblocks one.
+func (s *ExpiringFirstSelector) usableByQuota(auths []*Auth, provider, model string, now time.Time) ([]*Auth, map[string]bool, error) {
 	usable := make([]*Auth, 0, len(auths))
+	creditOnly := make(map[string]bool)
 	var soonestReset time.Time
 	for _, candidate := range auths {
-		exhaustedUntil := s.exhaustedUntil(candidate.ID, model, now)
-		if exhaustedUntil.IsZero() {
-			usable = append(usable, candidate)
+		standing, blockedUntil := s.quotaStanding(candidate.ID, model, now)
+		switch standing {
+		case standingBlocked:
+			if !blockedUntil.IsZero() && (soonestReset.IsZero() || blockedUntil.Before(soonestReset)) {
+				soonestReset = blockedUntil
+			}
 			continue
+		case standingCreditOnly:
+			creditOnly[candidate.ID] = true
 		}
-		if soonestReset.IsZero() || exhaustedUntil.Before(soonestReset) {
-			soonestReset = exhaustedUntil
-		}
+		usable = append(usable, candidate)
 	}
 	if len(usable) > 0 || len(auths) == 0 {
-		return usable, nil
+		return usable, creditOnly, nil
+	}
+	if soonestReset.IsZero() {
+		return nil, nil, newAuthUnavailableError(soonestReset, now)
 	}
 	providerForError := provider
 	if providerForError == "mixed" {
 		providerForError = ""
 	}
-	return nil, newModelCooldownError(model, providerForError, soonestReset.Sub(now))
+	return nil, nil, newModelCooldownError(model, providerForError, soonestReset.Sub(now))
 }
 
-// exhaustedUntil returns when the credential becomes usable again by its
-// quota reading: the latest reset among its exhausted windows that have not
-// reset yet. Zero means no window blocks it. A window without a reset time
-// never blocks, because nothing would end the block.
-func (s *ExpiringFirstSelector) exhaustedUntil(credentialID, model string, now time.Time) time.Time {
+// quotaStanding reads the credential's quota windows for the model. An
+// exhausted window blocks the credential until its reset time, unless a
+// credit balance is left, which makes it credit-only. A window that has
+// already reset counts as full, and an exhausted window without a reset time
+// never blocks, because nothing would end the block. A credential whose only
+// readings are credit balances is credit-only while any balance is left.
+func (s *ExpiringFirstSelector) quotaStanding(credentialID, model string, now time.Time) (quotaStanding, time.Time) {
 	if s == nil || s.readings == nil {
-		return time.Time{}
+		return standingSubscription, time.Time{}
 	}
-	var until time.Time
+	var blockedUntil time.Time
+	hasSubscription, hasCredit, creditLeft := false, false, false
 	for _, reading := range s.readings.Readings(credentialID, canonicalModelKey(model)) {
-		if !reading.Exhausted() || !reading.ResetAt.After(now) {
+		if reading.Kind == quotareading.KindCredit {
+			hasCredit = true
+			creditLeft = creditLeft || !reading.Exhausted()
 			continue
 		}
-		if reading.ResetAt.After(until) {
-			until = reading.ResetAt
+		hasSubscription = true
+		if reading.Exhausted() && reading.ResetAt.After(now) && reading.ResetAt.After(blockedUntil) {
+			blockedUntil = reading.ResetAt
 		}
 	}
-	return until
+	subscriptionBlocked := !blockedUntil.IsZero()
+	switch {
+	case (subscriptionBlocked || !hasSubscription) && creditLeft:
+		return standingCreditOnly, time.Time{}
+	case subscriptionBlocked:
+		return standingBlocked, blockedUntil
+	case !hasSubscription && hasCredit:
+		return standingBlocked, time.Time{}
+	default:
+		return standingSubscription, time.Time{}
+	}
 }
 
 // Pick-log reasons. The routing report parses these tokens.
@@ -140,6 +193,7 @@ const (
 	expiringFirstReasonBindingKept = "binding_kept"
 	expiringFirstReasonMoreUrgent  = "more_urgent"
 	expiringFirstReasonNoData      = "no_data"
+	expiringFirstReasonCreditOnly  = "credit_only"
 )
 
 // observeBindingKept logs a pick that affinity served from an existing
@@ -176,9 +230,10 @@ func logExpiringFirstPick(ctx context.Context, auth *Auth, urgency float64, know
 		auth.ID, urgencyText, reason, thread, provider, model)
 }
 
-// nextNoData rotates through credentials with no reading, resuming after the
-// previous pick even when the candidate set changed in between.
-func (s *ExpiringFirstSelector) nextNoData(key string, candidates []*Auth) *Auth {
+// nextInTurn rotates through credentials without an urgency (no reading, or
+// credit-only), resuming after the previous pick even when the candidate set
+// changed in between.
+func (s *ExpiringFirstSelector) nextInTurn(key string, candidates []*Auth) *Auth {
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
 	s.mu.Lock()
 	defer s.mu.Unlock()
