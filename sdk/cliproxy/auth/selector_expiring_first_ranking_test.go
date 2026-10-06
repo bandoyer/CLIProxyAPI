@@ -234,6 +234,56 @@ func TestExpiringFirstLowerTierServesOnlyWhenHigherTierHasNoUsableCredential(t *
 	}
 }
 
+func TestExpiringFirstCredentialsFromTwoProvidersAreRankedTogether(t *testing.T) {
+	clock := newAffinityTestClock()
+	claude := "ef-1-" + t.Name()
+	manager := newExpiringFirstManager(t, clock, claude)
+	codex := "ef-2-" + t.Name()
+	registry.GetGlobalRegistry().RegisterClient(codex, "codex", []*registry.ModelInfo{{ID: expiringFirstTestModel}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(codex) })
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: codex, Provider: "codex", Status: StatusActive}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	manager.RegisterExecutor(&mockCustomErrorExecutor{
+		identifier: "codex",
+		executeFn: func(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
+		},
+	})
+	recordWeekly := func(id string, shareLeft float64, resetIn time.Duration) {
+		manager.QuotaReadings().Record(id, quotareading.Reading{
+			Window: "weekly", Kind: quotareading.KindRanking, Length: 7 * 24 * time.Hour,
+			ShareLeft: shareLeft, ResetAt: clock.Now().Add(resetIn), LearnedAt: clock.Now(),
+		})
+	}
+	executeMixed := func(thread string) string {
+		t.Helper()
+		opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{thread}}, Metadata: map[string]any{}}
+		response, errExecute := manager.Execute(context.Background(), []string{"claude", "codex"}, cliproxyexecutor.Request{Model: expiringFirstTestModel}, opts)
+		if errExecute != nil {
+			t.Fatalf("execute %s: %v", thread, errExecute)
+		}
+		return string(response.Payload)
+	}
+
+	recordSevenDay(manager, clock, claude, 0.90, 4*24*time.Hour) // 0.94%/h
+	recordWeekly(codex, 0.40, 3*time.Hour)                       // 13.33%/h
+	hook := captureInfoLogs(t)
+	if got := executeMixed("thread-1"); got != codex {
+		t.Fatalf("thread-1: credential = %s, want the more urgent Codex credential %s", got, codex)
+	}
+	lines := expiringFirstPickLines(hook)
+	want := "expiring-first pick | credential=" + codex + " urgency=13.33%/h reason=more_urgent thread=header:thread-1 provider=mixed"
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], want) {
+		t.Fatalf("pick log lines = %q, want one with prefix %q", lines, want)
+	}
+
+	recordSevenDay(manager, clock, claude, 0.80, 2*time.Hour) // 40%/h
+	if got := executeMixed("thread-2"); got != claude {
+		t.Fatalf("thread-2: credential = %s, want the now more urgent Claude credential %s", got, claude)
+	}
+}
+
 func TestExpiringFirstReadingWithPassedResetRanksAsFullWindow(t *testing.T) {
 	clock := newAffinityTestClock()
 	passed, fresh := "ef-1-"+t.Name(), "ef-2-"+t.Name()
