@@ -12,6 +12,23 @@ import (
 type Store struct {
 	mu       sync.RWMutex
 	readings map[string]map[string]Reading
+	observer Observer
+}
+
+// Observer is told which readings a Record call accepted. It runs after the
+// store is unlocked, on the caller's goroutine, so it may read the store.
+type Observer func(credentialID string, accepted []Reading)
+
+// SetObserver sets the function that every Record call reports its accepted
+// readings to. The auth manager uses it to mark a credential with an exhausted
+// window quota-exceeded until the window's reset time. Nil removes it.
+func (s *Store) SetObserver(observer Observer) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.observer = observer
 }
 
 // NewStore returns an empty store.
@@ -24,12 +41,21 @@ func NewStore() *Store {
 // is not older (by LearnedAt), whatever its source. Windows that the new
 // readings do not mention are kept, so a window that only polling returns
 // stays until a newer reading of that window arrives. Readings without a
-// window name, or calls without a credential ID, are ignored.
+// window name, or calls without a credential ID, are ignored. The observer,
+// if one is set, is told about the accepted readings.
 func (s *Store) Record(credentialID string, readings ...Reading) []Reading {
 	credentialID = strings.TrimSpace(credentialID)
 	if s == nil || credentialID == "" || len(readings) == 0 {
 		return nil
 	}
+	accepted, observer := s.record(credentialID, readings)
+	if observer != nil && len(accepted) > 0 {
+		observer(credentialID, append([]Reading(nil), accepted...))
+	}
+	return accepted
+}
+
+func (s *Store) record(credentialID string, readings []Reading) ([]Reading, Observer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var accepted []Reading
@@ -49,7 +75,7 @@ func (s *Store) Record(credentialID string, readings ...Reading) []Reading {
 		windows[reading.Window] = reading
 		accepted = append(accepted, reading)
 	}
-	return accepted
+	return accepted, s.observer
 }
 
 // Readings returns the credential's readings that count for a request on

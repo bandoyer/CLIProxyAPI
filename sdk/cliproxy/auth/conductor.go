@@ -151,7 +151,10 @@ type Manager struct {
 	selector                  Selector
 	hook                      Hook
 	// quotaReadings outlives selectors, so a routing hot reload keeps them.
-	quotaReadings    *quotareading.Store
+	quotaReadings *quotareading.Store
+	// nowFunc is the clock for availability checks and quota-reading marks.
+	// Nil means time.Now; tests inject a controllable clock.
+	nowFunc          func() time.Time
 	resultPolicy     atomic.Pointer[resultPolicyHolder]
 	mu               sync.RWMutex
 	selectorMu       sync.Mutex
@@ -242,7 +245,16 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		manager.ApplyHomeInFlightPublisherConfig(defaultInFlightConfig)
 	}
 	manager.scheduler = newAuthScheduler(selector)
+	manager.quotaReadings.SetObserver(manager.markExhaustedQuotaWindows)
 	return manager
+}
+
+// now returns the manager's current time from its clock.
+func (m *Manager) now() time.Time {
+	if m != nil && m.nowFunc != nil {
+		return m.nowFunc()
+	}
+	return time.Now()
 }
 
 // QuotaReadings returns the manager's quota readings. Response headers feed

@@ -1091,6 +1091,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			entry.Infof("session-affinity: bound auth recovering from upstream overload, detour without rebinding | session=%s bound=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
 			return auth, nil
 		}
+		boundProvider, endReason := bindingEndReasonFromContext(ctx, cachedAuthID, model)
+		logBindingEnded(ctx, primaryID, cachedAuthID, boundProvider, model, endReason)
 		bind(auth.ID)
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 		return auth, nil
@@ -1600,11 +1602,21 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		return
 	}
 
+	ended := false
 	if s.cache.CompareAndDelete(cacheKey, res.AuthID) {
 		s.clearDetour(cacheKey)
+		ended = true
 	}
 	if fallbackKey != "" && s.cache.CompareAndDelete(fallbackKey, res.AuthID) {
 		s.clearDetour(fallbackKey)
+		ended = true
+	}
+	if ended {
+		thread := primaryID
+		if thread == "" {
+			thread = fallbackID
+		}
+		logBindingEnded(context.Background(), thread, res.AuthID, res.Provider, nsModel, bindingEndReasonForStatus(res.Error.StatusCode()))
 	}
 }
 

@@ -304,7 +304,7 @@ func (m *Manager) filterExecutionModels(auth *Auth, routeModel string, candidate
 	if len(candidates) == 0 {
 		return nil
 	}
-	now := time.Now()
+	now := m.now()
 	out := make([]string, 0, len(candidates))
 	for _, upstreamModel := range candidates {
 		stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)

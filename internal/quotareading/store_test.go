@@ -71,3 +71,22 @@ func TestStoreIgnoresReadingsWithoutCredentialOrWindow(t *testing.T) {
 		t.Fatalf("Snapshot() = %+v, want empty", snapshot)
 	}
 }
+
+func TestStoreTellsItsObserverOnlyTheAcceptedReadings(t *testing.T) {
+	store := NewStore()
+	var observed [][]Reading
+	store.SetObserver(func(credentialID string, accepted []Reading) {
+		if credentialID != "claude-a" {
+			t.Errorf("observer credential = %q, want claude-a", credentialID)
+		}
+		observed = append(observed, accepted)
+	})
+	newer := sevenDayReading(0.6, storeTestNow, SourceHeader)
+	store.Record("claude-a", newer)
+	store.Record("claude-a", sevenDayReading(0.9, storeTestNow.Add(-time.Minute), SourcePoll))
+
+	if len(observed) != 1 {
+		t.Fatalf("observer calls = %d, want 1 (the older reading was not accepted)", len(observed))
+	}
+	assertReadings(t, observed[0], []Reading{newer})
+}
