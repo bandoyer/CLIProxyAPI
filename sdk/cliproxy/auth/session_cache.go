@@ -28,6 +28,7 @@ type SessionCache struct {
 	evictionElements map[string]*list.Element
 	maxEntries       int
 	ttl              time.Duration
+	nowFunc          func() time.Time
 	stopCh           chan struct{}
 	stopOnce         sync.Once
 }
@@ -40,11 +41,20 @@ func NewSessionCache(ttl time.Duration) *SessionCache {
 
 // NewSessionCacheWithCapacity creates a cache with the specified TTL and max entries limit.
 func NewSessionCacheWithCapacity(ttl time.Duration, maxEntries int) *SessionCache {
+	return newSessionCache(ttl, maxEntries, nil)
+}
+
+// newSessionCache creates a cache that reads time from nowFunc (time.Now when nil),
+// so binding expiry and sliding refresh can run on a controllable clock.
+func newSessionCache(ttl time.Duration, maxEntries int, nowFunc func() time.Time) *SessionCache {
 	if ttl <= 0 {
 		ttl = 30 * time.Minute
 	}
 	if maxEntries <= 0 {
 		maxEntries = defaultMaxSessionEntries
+	}
+	if nowFunc == nil {
+		nowFunc = time.Now
 	}
 	c := &SessionCache{
 		entries:          make(map[string]sessionEntry),
@@ -53,10 +63,18 @@ func NewSessionCacheWithCapacity(ttl time.Duration, maxEntries int) *SessionCach
 		evictionElements: make(map[string]*list.Element),
 		maxEntries:       maxEntries,
 		ttl:              ttl,
+		nowFunc:          nowFunc,
 		stopCh:           make(chan struct{}),
 	}
 	go c.cleanupLoop()
 	return c
+}
+
+func (c *SessionCache) now() time.Time {
+	if c.nowFunc != nil {
+		return c.nowFunc()
+	}
+	return time.Now()
 }
 
 func (c *SessionCache) ensureInitializedLocked() {
@@ -81,7 +99,7 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 		return "", false
 	}
 	c.mu.RLock()
-	now := time.Now()
+	now := c.now()
 	entry, ok := c.entries[sessionID]
 	if ok && now.Before(entry.expiresAt) {
 		c.mu.RUnlock()
@@ -99,7 +117,7 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if time.Now().Before(entry.expiresAt) {
+	if c.now().Before(entry.expiresAt) {
 		return entry.authID, true
 	}
 	c.removeAliasGroupLocked(entry)
@@ -119,7 +137,7 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	now := time.Now()
+	now := c.now()
 	if !now.Before(entry.expiresAt) {
 		c.removeAliasGroupLocked(entry)
 		return "", false
@@ -147,7 +165,7 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitializedLocked()
-	now := time.Now()
+	now := c.now()
 
 	aliases := mergeSessionAliases(nil, sessionIDs...)
 	previousGroups := make([]sessionEntry, 0, len(sessionIDs))
@@ -317,7 +335,7 @@ func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitializedLocked()
-	now := time.Now()
+	now := c.now()
 	entry, ok := c.entries[sessionID]
 	if !ok || entry.authID != expectedAuthID || !now.Before(entry.expiresAt) {
 		return false
@@ -435,7 +453,7 @@ func (c *SessionCache) Len() int {
 }
 
 func (c *SessionCache) cleanup() {
-	now := time.Now()
+	now := c.now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitializedLocked()
