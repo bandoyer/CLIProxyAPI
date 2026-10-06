@@ -269,33 +269,54 @@ func (s *ExpiringFirstSelector) nextInTurn(key string, candidates []*Auth) *Auth
 	return picked
 }
 
-// urgency returns the credential's urgency in percent per hour, from its
-// ranking window: the longest KindRanking reading. A reading whose reset time
-// has passed counts as a full window that resets one window length from now.
+// urgency returns the credential's urgency in percent per hour for a request
+// on model. It comes from the ranking window (the longest KindRanking
+// reading) or, when a per-model window applies to model, from the more urgent
+// of that window (the longest such reading) and the ranking window. A reading
+// whose reset time has passed counts as a full window that resets one window
+// length from now.
 func (s *ExpiringFirstSelector) urgency(credentialID, model string, now time.Time) (float64, bool) {
 	if s == nil || s.readings == nil {
 		return 0, false
 	}
-	var ranking *quotareading.Reading
 	readings := s.readings.Readings(credentialID, canonicalModelKey(model))
+	urgency, known := 0.0, false
+	for _, kind := range []quotareading.Kind{quotareading.KindRanking, quotareading.KindPerModel} {
+		windowUrgency, ok := readingUrgency(longestReading(readings, kind), now)
+		if ok && (!known || windowUrgency > urgency) {
+			urgency, known = windowUrgency, true
+		}
+	}
+	return urgency, known
+}
+
+// longestReading returns the longest reading of kind that has a reset time,
+// or nil.
+func longestReading(readings []quotareading.Reading, kind quotareading.Kind) *quotareading.Reading {
+	var longest *quotareading.Reading
 	for i := range readings {
-		reading := readings[i]
-		if reading.Kind != quotareading.KindRanking || reading.ResetAt.IsZero() {
+		reading := &readings[i]
+		if reading.Kind != kind || reading.ResetAt.IsZero() {
 			continue
 		}
-		if ranking == nil || reading.Length > ranking.Length {
-			ranking = &readings[i]
+		if longest == nil || reading.Length > longest.Length {
+			longest = reading
 		}
 	}
-	if ranking == nil {
+	return longest
+}
+
+// readingUrgency returns one window's urgency: percent left ÷ hours to reset.
+func readingUrgency(reading *quotareading.Reading, now time.Time) (float64, bool) {
+	if reading == nil {
 		return 0, false
 	}
-	shareLeft, untilReset := ranking.ShareLeft, ranking.ResetAt.Sub(now)
+	shareLeft, untilReset := reading.ShareLeft, reading.ResetAt.Sub(now)
 	if untilReset <= 0 {
-		if ranking.Length <= 0 {
+		if reading.Length <= 0 {
 			return 0, false
 		}
-		shareLeft, untilReset = 1, ranking.Length
+		shareLeft, untilReset = 1, reading.Length
 	}
 	return shareLeft * 100 / untilReset.Hours(), true
 }

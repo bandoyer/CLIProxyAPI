@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -170,6 +171,12 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, fmt.Errorf("update auth: %w", errWeight)
 	}
+	// Read the refresh result's usage before the merge, which keeps the
+	// current runtime quota state.
+	var refreshReadings []quotareading.Reading
+	if mode == updateModeRefresh {
+		refreshReadings = refreshQuotaReadings(auth)
+	}
 	m.mu.Lock()
 	existing, ok := m.auths[auth.ID]
 	if !ok || existing == nil {
@@ -267,6 +274,9 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
+	if len(refreshReadings) > 0 {
+		m.quotaReadings.Record(auth.ID, refreshReadings...)
+	}
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
