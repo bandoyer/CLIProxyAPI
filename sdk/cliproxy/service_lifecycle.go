@@ -93,6 +93,7 @@ func (s *Service) Run(ctx context.Context) error {
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(ctx, interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
+		s.startUsagePoller(ctx)
 	}
 	if s.coreManager != nil {
 		go s.coreManager.NewQuotaResetLog(nil).Run(ctx, quotareading.DefaultResetLogInterval)
@@ -291,6 +292,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.watcherCancel != nil {
 			s.watcherCancel()
 		}
+		s.stopUsagePoller()
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
 		}
