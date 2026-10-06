@@ -363,6 +363,17 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		} else if rootAuthFileField(fieldPath) == coreauth.AttributeWeight {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "weight does not support nested fields"})
 			return
+		} else if rootAuthFileField(fieldPath) == authFileRenewalDayField {
+			if value == nil && fieldPath == authFileRenewalDayField {
+				delete(targetAuth.Metadata, authFileRenewalDayField)
+			} else {
+				renewalDay, okDay := authFileRenewalDayValue(value)
+				if !okDay || fieldPath != authFileRenewalDayField {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "renewal_day must be an integer from 1 to 31, or null to clear it"})
+					return
+				}
+				targetAuth.Metadata[authFileRenewalDayField] = renewalDay
+			}
 		} else if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
 		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
@@ -761,6 +772,39 @@ func syncAuthFileNoteAttribute(auth *coreauth.Auth) {
 		return
 	}
 	auth.Attributes["note"] = note
+}
+
+// authFileRenewalDayField holds the day of the month a credential's
+// subscription renews, saved by the user for providers that report no date.
+const authFileRenewalDayField = "renewal_day"
+
+// authFileRenewalDayValue returns the renewal day when value is an integer
+// from 1 to 31.
+func authFileRenewalDayValue(value any) (int, bool) {
+	var day int64
+	switch typed := value.(type) {
+	case int:
+		day = int64(typed)
+	case int64:
+		day = typed
+	case float64:
+		if typed != float64(int64(typed)) {
+			return 0, false
+		}
+		day = int64(typed)
+	case json.Number:
+		parsed, errInt := typed.Int64()
+		if errInt != nil {
+			return 0, false
+		}
+		day = parsed
+	default:
+		return 0, false
+	}
+	if day < 1 || day > 31 {
+		return 0, false
+	}
+	return int(day), true
 }
 
 func syncAuthFileWebsocketsAttribute(auth *coreauth.Auth) {
