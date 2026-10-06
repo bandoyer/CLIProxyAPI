@@ -3,6 +3,8 @@ package auth
 import (
 	"strconv"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // AttributeWebsockets names the attribute and metadata key that turns the
@@ -28,6 +30,21 @@ func (a *Auth) WebsocketsEnabled() bool {
 // Codex API key.
 func (a *Auth) isCodexCredential() bool {
 	return a != nil && strings.EqualFold(strings.TrimSpace(a.Provider), "codex") && a.AuthKind() != AuthKindAPIKey
+}
+
+// codexWebsocketsTurnedOff reports whether a Codex credential has the
+// upstream WebSocket transport turned off.
+func codexWebsocketsTurnedOff(a *Auth) bool {
+	return a.isCodexCredential() && !a.WebsocketsEnabled()
+}
+
+// warnCodexWebsocketsTurnedOff logs one warning per Codex credential with
+// WebSockets off. WebSocket clients prefer WebSocket-enabled credentials, so
+// in a mixed pool the transport, not quota urgency, chooses the credential.
+func warnCodexWebsocketsTurnedOff(authIDs []string) {
+	for _, authID := range authIDs {
+		log.WithField("auth_id", authID).Warn("codex credential has upstream websockets turned off (websockets: false); websocket clients prefer websocket-enabled codex credentials, so in a mixed pool the transport, not quota urgency, chooses the credential")
+	}
 }
 
 // websocketsFlag returns the explicit WebSocket flag and whether one is set.
