@@ -581,6 +581,61 @@ func (s *Service) resolveCooldownStateStore(cfg *config.Config) coreauth.Cooldow
 	return coreauth.NewFileCooldownStateStoreWithAuthDir(authDir, authDir)
 }
 
+// resolveSessionBindingStore returns the bindings file store in the auth
+// directory, next to the cooldown status files. Home mode keeps no local bindings.
+func resolveSessionBindingStore(cfg *config.Config) *coreauth.FileSessionBindingStore {
+	if cfg == nil || cfg.Home.Enabled {
+		return nil
+	}
+	authDir, errResolve := resolveCooldownStateAuthDir(cfg)
+	if errResolve != nil {
+		log.Warnf("failed to resolve session bindings directory: %v", errResolve)
+		return nil
+	}
+	if authDir == "" {
+		return nil
+	}
+	return coreauth.NewFileSessionBindingStore(authDir)
+}
+
+// restoreSessionBindings loads the bindings saved on the last graceful shutdown.
+// A missing or corrupt file is logged and ignored.
+func (s *Service) restoreSessionBindings(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	s.cfgMu.RLock()
+	store := resolveSessionBindingStore(s.cfg)
+	s.cfgMu.RUnlock()
+	if store == nil {
+		return
+	}
+	restored, errRestore := s.coreManager.RestoreSessionBindings(ctx, store)
+	if errRestore != nil {
+		log.Warnf("ignoring saved session bindings: %v", errRestore)
+		return
+	}
+	log.Infof("restored %d session bindings from %s", restored, store.Path())
+}
+
+// saveSessionBindings writes the current bindings for the next startup.
+func (s *Service) saveSessionBindings(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	s.cfgMu.RLock()
+	store := resolveSessionBindingStore(s.cfg)
+	s.cfgMu.RUnlock()
+	if store == nil {
+		return
+	}
+	if errSave := s.coreManager.SaveSessionBindings(ctx, store); errSave != nil {
+		log.Warnf("failed to save session bindings: %v", errSave)
+		return
+	}
+	log.Infof("saved session bindings to %s", store.Path())
+}
+
 func resolveCooldownStateAuthDir(cfg *config.Config) (string, error) {
 	if cfg == nil {
 		return "", nil

@@ -84,6 +84,7 @@ func (s *Service) Run(ctx context.Context) error {
 				log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
 			}
 		}
+		s.restoreSessionBindings(ctx)
 		s.registerAvailableExecutors(ctx, executorRegistrationOptions{
 			includeBaseline: true,
 			auths:           s.coreManager.List(),
@@ -332,6 +333,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				}
 			}
 		}
+
+		// Requests have stopped, so the bindings are final. A crash skips this.
+		s.saveSessionBindings(ctx)
 
 		if s.pluginHost != nil {
 			sdktranslator.SetPluginHooks(nil)
