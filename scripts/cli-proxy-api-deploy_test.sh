@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Tests for cli-proxy-api-deploy.sh.
 #
-# The deploy script runs against a throwaway git repository and stub
-# commands (go, systemctl, curl, journalctl, notify-send, sleep) placed first
-# on PATH, so no real service, binary or notification is touched.
+# The deploy script runs against throwaway git repositories (the proxy and the
+# panel fork) and stub commands (go, bun, systemctl, curl, journalctl,
+# notify-send, sleep) placed first on PATH, so no real service, binary,
+# panel or notification is touched.
 #
 # Run: scripts/cli-proxy-api-deploy_test.sh
 set -euo pipefail
@@ -33,6 +34,17 @@ assert_not_contains() {
 	fi
 }
 
+# assert_before checks that the first line with $2 comes before the first
+# line with $3.
+assert_before() {
+	local file="$1" first="$2" second="$3" a b
+	a="$(grep -nF -- "$first" "$file" | head -n 1 | cut -d: -f1)"
+	b="$(grep -nF -- "$second" "$file" | head -n 1 | cut -d: -f1)"
+	if [[ -z "$a" || -z "$b" || "$a" -ge "$b" ]]; then
+		fail "expected '$first' before '$second' in $(basename "$file"); got: $(cat "$file")"
+	fi
+}
+
 assert_count() {
 	local file="$1" needle="$2" want="$3" got
 	got="$(grep -cF -- "$needle" "$file" 2>/dev/null || true)"
@@ -41,15 +53,35 @@ assert_count() {
 	fi
 }
 
-# setup builds a sandbox: a bare origin, a clone on main tagged v1.2.3, stub
-# commands, and an install directory. It sets the globals used by the tests.
+# commit_panel commits a change to the panel fork in clone $1 and pushes it.
+commit_panel() {
+	local clone="$1" message="$2"
+	echo "$message" >>"$clone/src.ts"
+	git -C "$clone" add src.ts
+	git -C "$clone" -c user.name=t -c user.email=t@example.com commit -q -m "$message"
+	git -C "$clone" push -q origin main 2>/dev/null
+}
+
+# setup builds a sandbox: a bare origin, a clone on main tagged v1.2.3, the
+# same for the panel fork, stub commands, a config with panel auto-update
+# off, and install directories. It sets the globals used by the tests.
 setup() {
 	SANDBOX="$(mktemp -d)"
 	STATE="$SANDBOX/state"
 	STUBS="$SANDBOX/stubs"
 	REPO="$SANDBOX/repo"
 	BIN="$SANDBOX/install/cli-proxy-api"
-	mkdir -p "$STATE" "$STUBS" "$SANDBOX/install"
+	PANEL="$SANDBOX/panel"
+	STATIC="$SANDBOX/config/static"
+	CONFIG="$SANDBOX/config/config.yaml"
+	mkdir -p "$STATE" "$STUBS" "$SANDBOX/install" "$SANDBOX/config"
+	printf 'management:\n  disable-auto-update-panel: true\n' >"$CONFIG"
+
+	git init -q --bare -b main "$SANDBOX/panel-origin.git"
+	git clone -q "$SANDBOX/panel-origin.git" "$PANEL" 2>/dev/null
+	git -C "$PANEL" switch -q -c main 2>/dev/null || true
+	commit_panel "$PANEL" init
+	git -C "$PANEL" push -q -u origin main 2>/dev/null
 
 	git init -q --bare -b main "$SANDBOX/origin.git"
 	git clone -q "$SANDBOX/origin.git" "$REPO" 2>/dev/null
@@ -112,6 +144,18 @@ EOF
 echo "notify-send $*" >>"$STATE/notifications"
 EOF
 
+	# bun stub: "run build" writes the single-file page for the checkout's
+	# commit, or every call fails with FAKE_BUN_EXIT.
+	cat >"$STUBS/bun" <<'EOF'
+#!/usr/bin/env bash
+echo "bun $* (in $PWD)" >>"$STATE/calls"
+[[ "${FAKE_BUN_EXIT:-0}" == 0 ]] || exit "$FAKE_BUN_EXIT"
+if [[ "$*" == "run build" ]]; then
+	mkdir -p dist
+	echo "<html>panel $(git rev-parse --short HEAD)</html>" >dist/index.html
+fi
+EOF
+
 	cat >"$STUBS/sleep" <<'EOF'
 #!/usr/bin/env bash
 exit 0
@@ -141,6 +185,10 @@ run_deploy() {
 		CLI_PROXY_API_REPO="$REPO" \
 		CLI_PROXY_API_BIN="$BIN" \
 		CLI_PROXY_API_HEALTH_ATTEMPTS=3 \
+		CLI_PROXY_API_PANEL_REPO="${PANEL_REPO_OVERRIDE:-$PANEL}" \
+		CLI_PROXY_API_STATIC_DIR="$STATIC" \
+		CLI_PROXY_API_CONFIG="$CONFIG" \
+		CLI_PROXY_API_BUN="${BUN_OVERRIDE:-bun}" \
 		"$DEPLOY" "$@" >"$STATE/out" 2>&1
 	DEPLOY_EXIT=$?
 	set -e
@@ -204,6 +252,93 @@ test_deploy_refuses_a_checkout_not_on_main() {
 	assert_not_contains "$STATE/calls" "restart"
 	"$BIN" >"$STATE/version" || true
 	assert_contains "$STATE/version" "Version: v1.0.0"
+}
+
+# install_previous_panel puts an already installed page in place.
+install_previous_panel() {
+	mkdir -p "$STATIC"
+	echo "<html>previous panel</html>" >"$STATIC/management.html"
+}
+
+test_deploy_installs_the_built_panel_before_the_restart() {
+	install_previous
+	install_previous_panel
+	run_deploy
+
+	[[ "$DEPLOY_EXIT" == 0 ]] || fail "exit $DEPLOY_EXIT, output: $(cat "$STATE/out")"
+	assert_contains "$STATIC/management.html" "panel $(git -C "$PANEL" rev-parse --short HEAD)"
+	assert_contains "$STATE/calls" "bun install --frozen-lockfile (in $PANEL)"
+	assert_before "$STATE/calls" "bun run build" "systemctl --user restart"
+	assert_not_contains "$STATE/out" "warning"
+}
+
+test_deploy_builds_the_latest_panel_main_from_its_origin() {
+	install_previous
+	local other="$SANDBOX/panel-other"
+	git clone -q "$SANDBOX/panel-origin.git" "$other" 2>/dev/null
+	commit_panel "$other" "merged panel PR"
+
+	run_deploy
+
+	[[ "$DEPLOY_EXIT" == 0 ]] || fail "exit $DEPLOY_EXIT, output: $(cat "$STATE/out")"
+	assert_contains "$STATIC/management.html" "panel $(git -C "$other" rev-parse --short HEAD)"
+}
+
+test_missing_panel_checkout_warns_and_still_deploys_the_proxy() {
+	install_previous
+	PANEL_REPO_OVERRIDE="$SANDBOX/no-such-panel" run_deploy
+
+	[[ "$DEPLOY_EXIT" == 0 ]] || fail "exit $DEPLOY_EXIT, output: $(cat "$STATE/out")"
+	assert_contains "$STATE/out" "warning: panel checkout $SANDBOX/no-such-panel not found"
+	assert_not_contains "$STATE/calls" "bun "
+	assert_contains "$STATE/calls" "systemctl --user restart cli-proxy-api.service"
+	"$BIN" >"$STATE/new-version" || true
+	assert_contains "$STATE/new-version" "Version: v1.2.3"
+}
+
+test_panel_checkout_not_on_main_is_skipped_with_a_warning() {
+	install_previous
+	install_previous_panel
+	git -C "$PANEL" switch -q -c feature
+
+	run_deploy
+
+	[[ "$DEPLOY_EXIT" == 0 ]] || fail "exit $DEPLOY_EXIT, output: $(cat "$STATE/out")"
+	assert_contains "$STATE/out" "warning:"
+	assert_contains "$STATE/out" "switch it to main"
+	assert_not_contains "$STATE/calls" "bun "
+	assert_contains "$STATIC/management.html" "previous panel"
+}
+
+test_failed_panel_build_keeps_the_installed_page_and_deploys_the_proxy() {
+	install_previous
+	install_previous_panel
+	FAKE_BUN_EXIT=1 run_deploy
+
+	[[ "$DEPLOY_EXIT" == 0 ]] || fail "exit $DEPLOY_EXIT, output: $(cat "$STATE/out")"
+	assert_contains "$STATE/out" "warning: panel build failed"
+	assert_contains "$STATIC/management.html" "previous panel"
+	assert_contains "$STATE/calls" "systemctl --user restart cli-proxy-api.service"
+}
+
+test_missing_bun_skips_the_panel_with_a_warning() {
+	install_previous
+	BUN_OVERRIDE="$SANDBOX/no-such-bun" run_deploy
+
+	[[ "$DEPLOY_EXIT" == 0 ]] || fail "exit $DEPLOY_EXIT, output: $(cat "$STATE/out")"
+	assert_contains "$STATE/out" "warning: $SANDBOX/no-such-bun not found"
+	[[ ! -e "$STATIC/management.html" ]] || fail "expected no installed panel"
+}
+
+test_warns_when_panel_auto_update_is_not_disabled() {
+	install_previous
+	printf 'management:\n  disable-auto-update-panel: false\n' >"$CONFIG"
+
+	run_deploy
+
+	[[ "$DEPLOY_EXIT" == 0 ]] || fail "exit $DEPLOY_EXIT, output: $(cat "$STATE/out")"
+	assert_contains "$STATE/out" "warning:"
+	assert_contains "$STATE/out" "disable-auto-update-panel: true"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do

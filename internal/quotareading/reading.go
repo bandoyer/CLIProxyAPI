@@ -103,6 +103,8 @@ func FromHeaderSignals(provider string, signals map[string]string, learnedAt tim
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "claude":
 		return ParseClaudeHeaderSignals(signals, learnedAt)
+	case "codex":
+		return ParseCodexHeaderSignals(signals, learnedAt)
 	default:
 		return nil
 	}

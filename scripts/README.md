@@ -4,7 +4,7 @@ These files run the proxy as a systemd user service, deploy new builds to it, an
 
 | File | Purpose |
 |---|---|
-| `cli-proxy-api-deploy.sh` | Builds `main`, installs the binary, restarts the service, checks health, and rolls back on failure. |
+| `cli-proxy-api-deploy.sh` | Builds `main`, installs the binary and the management panel, restarts the service, checks health, and rolls back on failure. |
 | `cli-proxy-api-deploy_test.sh` | Tests the deploy script against stub commands. It does not touch the live service. |
 | `systemd/cli-proxy-api.service` | The user service. It restarts on failure. |
 | `systemd/cli-proxy-api-failure.service` | Sends a critical desktop notification each time the service fails. |
@@ -17,6 +17,7 @@ Installed paths:
 
 - Binary: `~/.local/bin/cli-proxy-api` (the previous build is kept as `cli-proxy-api.prev`)
 - Config: `~/.config/cli-proxy-api/config.yaml` (mode `600`); this is also the service's working directory
+- Management panel: `~/.config/cli-proxy-api/static/management.html`, built from the panel fork checkout at `~/Work/Cli-Proxy-API-Management-Center`
 - Unit: `cli-proxy-api.service`
 
 ## Install
@@ -30,7 +31,16 @@ systemctl --user link "$PWD/scripts/systemd/cli-proxy-api.service" \
   "$PWD/scripts/systemd/cli-proxy-api-failure.service"
 ```
 
-Put the config at `~/.config/cli-proxy-api/config.yaml` and run `chmod 600` on it. Then do the first deploy, enable the service at boot, and let it run without a login session:
+Put the config at `~/.config/cli-proxy-api/config.yaml` and run `chmod 600` on it. In the `management` section, set `disable-auto-update-panel: true`, so that the proxy does not replace the panel that the deploy installs.
+
+The panel is built from a clone of the panel fork, [bandoyer/Cli-Proxy-API-Management-Center](https://github.com/bandoyer/Cli-Proxy-API-Management-Center), on `main`. The build needs `bun` on `PATH`:
+
+```bash
+git clone https://github.com/bandoyer/Cli-Proxy-API-Management-Center.git ~/Work/Cli-Proxy-API-Management-Center
+mise use -g bun@1.3.14
+```
+
+Then do the first deploy, enable the service at boot, and let it run without a login session:
 
 ```bash
 cli-proxy-api-deploy
@@ -40,16 +50,17 @@ loginctl enable-linger "$USER"
 
 ## Deploy
 
-Run `cli-proxy-api-deploy` after you merge a fork PR that changes the server. Config edits hot-reload, so they do not need a deploy.
+Run `cli-proxy-api-deploy` after you merge a fork PR that changes the server or the panel. Config edits hot-reload, so they do not need a deploy.
 
 The script does these steps:
 
 1. Refuses to continue if the checkout is not on `main`, then runs `git pull --ff-only`.
 2. Builds `./cmd/server` with `main.Version` (`git describe --tags --always --dirty`), `main.Commit` and `main.BuildDate` set by `-ldflags -X`, as the `Dockerfile` does.
 3. Copies the current binary to `cli-proxy-api.prev` and installs the new one.
-4. Runs `systemctl --user restart cli-proxy-api.service` and polls `GET http://127.0.0.1:8317/healthz` for up to 30 seconds.
-5. On success, prints the version line from the startup log.
-6. On failure, moves the new binary to `cli-proxy-api.failed`, restores `cli-proxy-api.prev`, restarts, sends a critical `notify-send`, and exits with a non-zero status.
+4. Builds the panel: in the panel checkout, runs `git pull --ff-only`, `bun install --frozen-lockfile` and `bun run build`, then installs `dist/index.html` as `~/.config/cli-proxy-api/static/management.html`. If the checkout is missing or not on `main`, `bun` is missing, or the pull or build fails, the script logs a warning, keeps the installed page, and continues. It also warns if the config does not set `disable-auto-update-panel: true`.
+5. Runs `systemctl --user restart cli-proxy-api.service` and polls `GET http://127.0.0.1:8317/healthz` for up to 30 seconds.
+6. On success, prints the version line from the startup log.
+7. On failure, moves the new binary to `cli-proxy-api.failed`, restores `cli-proxy-api.prev`, restarts, sends a critical `notify-send`, and exits with a non-zero status. The rollback does not restore the previous panel.
 
 To check the running version later:
 
@@ -68,6 +79,10 @@ The defaults match the installed paths. The test uses these variables to run in 
 | `CLI_PROXY_API_UNIT` | `cli-proxy-api.service` |
 | `CLI_PROXY_API_HEALTH_URL` | `http://127.0.0.1:8317/healthz` |
 | `CLI_PROXY_API_HEALTH_ATTEMPTS` | `30` (one per second) |
+| `CLI_PROXY_API_PANEL_REPO` | `~/Work/Cli-Proxy-API-Management-Center` |
+| `CLI_PROXY_API_STATIC_DIR` | `~/.config/cli-proxy-api/static` (the proxy's static directory for this config) |
+| `CLI_PROXY_API_CONFIG` | `~/.config/cli-proxy-api/config.yaml` (only read for the `disable-auto-update-panel` check) |
+| `CLI_PROXY_API_BUN` | `bun` |
 
 ## Config backup
 
@@ -133,4 +148,4 @@ shellcheck scripts/*.sh
 systemd-analyze --user verify scripts/systemd/*.service scripts/systemd/*.path
 ```
 
-The test builds a throwaway git repository and puts stubs for `go`, `systemctl`, `curl`, `journalctl`, `notify-send` and `sleep` first on `PATH`. `systemd-analyze verify` reports that `~/.local/bin/cli-proxy-api` is missing until the first deploy, and that `~/.local/bin/cli-proxy-api-config-backup` is missing until the backup is installed.
+The test builds throwaway git repositories for the proxy and the panel fork, and puts stubs for `go`, `bun`, `systemctl`, `curl`, `journalctl`, `notify-send` and `sleep` first on `PATH`. `systemd-analyze verify` reports that `~/.local/bin/cli-proxy-api` is missing until the first deploy, and that `~/.local/bin/cli-proxy-api-config-backup` is missing until the backup is installed.

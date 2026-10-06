@@ -2,8 +2,9 @@
 # Deploy a new CLIProxyAPI build to the systemd user service.
 #
 # Builds the server from main with version ldflags, keeps the previous binary
-# as <bin>.prev, restarts the service and checks /healthz. See
-# scripts/README.md for install and usage.
+# as <bin>.prev, installs the management panel built from the panel fork,
+# restarts the service and checks /healthz. See scripts/README.md for install
+# and usage.
 set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -12,9 +13,57 @@ BIN="${CLI_PROXY_API_BIN:-$HOME/.local/bin/cli-proxy-api}"
 UNIT="${CLI_PROXY_API_UNIT:-cli-proxy-api.service}"
 HEALTH_URL="${CLI_PROXY_API_HEALTH_URL:-http://127.0.0.1:8317/healthz}"
 HEALTH_ATTEMPTS="${CLI_PROXY_API_HEALTH_ATTEMPTS:-30}"
+PANEL_REPO="${CLI_PROXY_API_PANEL_REPO:-$HOME/Work/Cli-Proxy-API-Management-Center}"
+STATIC_DIR="${CLI_PROXY_API_STATIC_DIR:-$HOME/.config/cli-proxy-api/static}"
+CONFIG="${CLI_PROXY_API_CONFIG:-$HOME/.config/cli-proxy-api/config.yaml}"
+BUN="${CLI_PROXY_API_BUN:-bun}"
 
 log() {
 	echo "deploy: $*" >&2
+}
+
+warn() {
+	log "warning: $*"
+}
+
+# install_panel builds the single-file management.html from the panel fork's
+# main and installs it into the proxy's static directory. A problem with the
+# panel is only a warning: the proxy deploy continues with the page that is
+# already installed.
+install_panel() {
+	local branch commit
+	if [[ ! -d "$PANEL_REPO/.git" ]]; then
+		warn "panel checkout $PANEL_REPO not found; skipping the panel"
+		return 0
+	fi
+	branch="$(git -C "$PANEL_REPO" branch --show-current)"
+	if [[ "$branch" != "main" ]]; then
+		warn "panel checkout $PANEL_REPO is on '${branch:-detached HEAD}'; switch it to main to deploy the panel"
+		return 0
+	fi
+	if ! command -v "$BUN" >/dev/null 2>&1; then
+		warn "$BUN not found; install bun (mise use -g bun) to deploy the panel"
+		return 0
+	fi
+	log "updating main in $PANEL_REPO"
+	if ! git -C "$PANEL_REPO" pull --ff-only --quiet; then
+		warn "git pull failed in $PANEL_REPO; skipping the panel"
+		return 0
+	fi
+	commit="$(git -C "$PANEL_REPO" rev-parse --short HEAD)"
+	log "building the panel ($commit)"
+	if ! (cd "$PANEL_REPO" && "$BUN" install --frozen-lockfile && "$BUN" run build) >&2 ||
+		[[ ! -s "$PANEL_REPO/dist/index.html" ]]; then
+		warn "panel build failed; keeping the installed management.html"
+		return 0
+	fi
+	mkdir -p "$STATIC_DIR"
+	cp "$PANEL_REPO/dist/index.html" "$STATIC_DIR/management.html.new"
+	mv -f "$STATIC_DIR/management.html.new" "$STATIC_DIR/management.html"
+	log "installed panel $commit as $STATIC_DIR/management.html"
+	if [[ -e "$CONFIG" ]] && ! grep -Eq '^[[:space:]]*disable-auto-update-panel:[[:space:]]*true' "$CONFIG"; then
+		warn "set disable-auto-update-panel: true in $CONFIG, or the proxy can replace the installed panel"
+	fi
 }
 
 # build compiles the server into $1 with the same -X ldflags as the Dockerfile.
@@ -101,6 +150,8 @@ main() {
 		cp -p "$BIN" "$BIN.prev"
 	fi
 	mv -f "$BIN.new" "$BIN"
+
+	install_panel
 
 	log "restarting $UNIT"
 	if restart && healthy; then
