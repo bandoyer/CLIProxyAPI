@@ -328,3 +328,42 @@ func TestExhaustedWindowMarksACredentialWhoseCreditIsUsedUp(t *testing.T) {
 		t.Fatalf("credential = %s, want %s (the other credential's window and credit are both used up)", got, other)
 	}
 }
+
+// Codex sends a zero credit balance on every response from an account without
+// credits. That alone must not mark the account; an exhausted Spark limit
+// marks only the Spark model.
+func TestCodexHeadersMarkOnlyTheExhaustedModelOfAnAccountWithoutCredits(t *testing.T) {
+	const spark, gpt = "gpt-5.3-codex-spark", "gpt-5.4"
+	clock := newAffinityTestClock()
+	clock.Advance(time.Now().Sub(clock.Now()))
+	bound, other := "qm-codex-1-"+t.Name(), "qm-codex-2-"+t.Name()
+	manager := newExpiringFirstProviderManager(t, clock, "codex", []string{spark, gpt}, bound, other)
+	manager.nowFunc = clock.Now
+	headers := map[string]http.Header{
+		// 40% of the week left in 3 hours; Spark used up for 2 hours; no credits.
+		bound: codexRateLimitHeaders(60, clock.Now().Add(3*time.Hour), 100, clock.Now().Add(2*time.Hour)),
+		// 90% of the week left in 4 days; Spark nearly idle; no credits.
+		other: codexRateLimitHeaders(10, clock.Now().Add(4*24*time.Hour), 1, clock.Now().Add(6*24*time.Hour)),
+	}
+	manager.RegisterExecutor(&mockCustomErrorExecutor{
+		identifier: "codex",
+		executeFn: func(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			internallogging.SetResponseHeaders(ctx, headers[auth.ID])
+			return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
+		},
+	})
+	// One pinned request per credential stands in for earlier traffic.
+	for _, credential := range []string{bound, other} {
+		opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: credential}}
+		if _, errExecute := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: gpt}, opts); errExecute != nil {
+			t.Fatalf("execute pinned to %s: %v", credential, errExecute)
+		}
+	}
+
+	if got := executeThread(t, manager, "codex", gpt, "gpt-thread"); got != bound {
+		t.Fatalf("%s thread: credential = %s, want %s (no credits must not block it)", gpt, got, bound)
+	}
+	if got := executeThread(t, manager, "codex", spark, "spark-thread"); got != other {
+		t.Fatalf("%s thread: credential = %s, want %s (its Spark limit is used up on %s)", spark, got, other, bound)
+	}
+}
