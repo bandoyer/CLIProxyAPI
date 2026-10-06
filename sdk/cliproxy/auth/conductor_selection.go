@@ -428,6 +428,13 @@ func (m *Manager) SetSelector(selector Selector) {
 		m.mu.Unlock()
 		return
 	}
+	// A routing hot reload rebuilds the affinity selector; carry the warm
+	// bindings over so threads keep their credential. Expired ones are dropped.
+	if oldHolder, ok := oldSelector.(sessionBindingHolder); ok {
+		if newHolder, okNew := selector.(sessionBindingHolder); okNew {
+			newHolder.restoreSessionBindings(oldHolder.sessionBindings())
+		}
+	}
 	m.selector = selector
 	m.mu.Unlock()
 

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"container/list"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -440,6 +441,65 @@ func (c *SessionCache) cleanupLoop() {
 			c.cleanup()
 		}
 	}
+}
+
+// snapshot returns every unexpired binding, one record per alias group.
+func (c *SessionCache) snapshot() []SessionBindingRecord {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	now := c.now()
+	records := make([]SessionBindingRecord, 0, len(c.groups))
+	for _, group := range c.groups {
+		if !now.Before(group.expiresAt) || len(group.aliases) == 0 {
+			continue
+		}
+		records = append(records, SessionBindingRecord{
+			AuthID:    group.authID,
+			ExpiresAt: group.expiresAt,
+			Keys:      append([]string(nil), group.aliases...),
+		})
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].Keys[0] < records[j].Keys[0] })
+	return records
+}
+
+// restore adds saved bindings with their saved expiry, dropping those already
+// expired on the cache's clock. An expiry beyond one lifetime from now is capped,
+// so a shortened TTL applies to restored bindings. It returns how many were restored.
+func (c *SessionCache) restore(records []SessionBindingRecord) int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitializedLocked()
+	now := c.now()
+	restored := 0
+	for _, record := range records {
+		if record.AuthID == "" || !now.Before(record.ExpiresAt) {
+			continue
+		}
+		aliases := compactSessionAliases(mergeSessionAliases(nil, record.Keys...))
+		if len(aliases) == 0 {
+			continue
+		}
+		expiresAt := record.ExpiresAt
+		if limit := now.Add(c.ttl); expiresAt.After(limit) {
+			expiresAt = limit
+		}
+		previous := make([]sessionEntry, 0, len(aliases))
+		for _, alias := range aliases {
+			if entry, ok := c.entries[alias]; ok {
+				previous = append(previous, entry)
+			}
+		}
+		c.replaceAliasGroupsLocked(record.AuthID, expiresAt, aliases, previous...)
+		restored++
+	}
+	return restored
 }
 
 // Len returns the current count of tracked session aliases.
