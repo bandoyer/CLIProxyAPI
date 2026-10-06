@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -213,6 +214,44 @@ func claudeUnifiedHeaders(sevenDayUsed float64, sevenDayReset time.Time) http.He
 		"Anthropic-Ratelimit-Unified-7d-Status":      []string{"allowed"},
 		"Anthropic-Ratelimit-Unified-7d-Utilization": []string{strconv.FormatFloat(sevenDayUsed, 'f', 2, 64)},
 		"Anthropic-Ratelimit-Unified-7d-Reset":       []string{strconv.FormatInt(sevenDayReset.Unix(), 10)},
+	}
+}
+
+func TestExpiringFirstOnItsOwnTrustsTheManagersAvailabilityForAliasedModels(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	ctx := context.Background()
+	const routeModel, targetModel = "ef-alias", "ef-alias-healthy-target"
+	manager := NewManager(nil, nil, nil)
+	manager.SetSelector(NewExpiringFirstSelector(ExpiringFirstConfig{Readings: manager.QuotaReadings()}))
+	manager.SetRetryConfig(0, 0, 0)
+	credential := "ef-alias-" + t.Name()
+	registry.GetGlobalRegistry().RegisterClient(credential, "codex", []*registry.ModelInfo{{ID: routeModel}, {ID: targetModel}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(credential) })
+	if _, errRegister := manager.Register(WithSkipPersist(ctx), &Auth{ID: credential, Provider: "codex", Status: StatusActive}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	retryAfter := time.Hour
+	manager.MarkResult(ctx, Result{
+		AuthID: credential, Provider: "codex", Model: routeModel, RetryAfter: &retryAfter,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "model quota"},
+	})
+	// The route model now resolves to a target that is healthy on the credential.
+	manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{Name: targetModel, Alias: routeModel, Fork: true}},
+	})
+	manager.RegisterExecutor(&mockCustomErrorExecutor{
+		identifier: "codex",
+		executeFn: func(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
+		},
+	})
+
+	response, errExecute := manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: routeModel}, cliproxyexecutor.Options{Metadata: map[string]any{}})
+	if errExecute != nil {
+		t.Fatalf("execute: %v (the selector re-applied a cooldown recorded under the alias name)", errExecute)
+	}
+	if got := string(response.Payload); got != credential {
+		t.Fatalf("credential = %s, want %s", got, credential)
 	}
 }
 
