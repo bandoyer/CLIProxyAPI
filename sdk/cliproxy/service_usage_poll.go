@@ -28,6 +28,7 @@ func (s *Service) startUsagePoller(ctx context.Context) {
 		Readings:    s.coreManager.QuotaReadings(),
 		Fetchers: []usagepoll.Fetcher{
 			usagepoll.NewCodexFetcher(s.coreManager, ""),
+			usagepoll.NewClaudeFetcher(s.coreManager, ""),
 			usagepoll.NewXAIFetcher(s.coreManager, ""),
 		},
 	})
