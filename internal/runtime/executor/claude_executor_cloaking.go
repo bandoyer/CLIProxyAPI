@@ -1656,6 +1656,17 @@ func upgradeClaudeCacheControlTTL(payload []byte, ttl string) []byte {
 	return payload
 }
 
+// claudePassthroughUpgradesCacheTTL reports whether a passthrough request (confirmed
+// native Claude Code on a Claude OAuth credential) gets the 1h TTL safety net.
+// Claude Code only sends 1h markers when the client sets ENABLE_PROMPT_CACHING_1H,
+// so a proxied main thread without it would silently pay 5m rewrites. The rule
+// matches the cloaked path: main-thread requests only, while subagents keep the
+// client's choice and probe and helper requests are left alone. The caller still
+// runs upgradeClaudeCacheControlTTL, so an explicit client ttl is never changed.
+func claudePassthroughUpgradesCacheTTL(confirmedClaudeCode, oauthCredential, isSubagent, isProbeOrHelper, helperProfile bool) bool {
+	return confirmedClaudeCode && oauthCredential && !isSubagent && !isProbeOrHelper && !helperProfile
+}
+
 // stripClaudeCacheControlTTL removes any ttl field from cache_control blocks in payload,
 // downgrading {"type":"ephemeral","ttl":"..."} to {"type":"ephemeral"}.
 // This ensures that when extended-cache-ttl-2025-04-11 is stripped (e.g. on probes,
