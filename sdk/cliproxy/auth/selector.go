@@ -962,6 +962,27 @@ func (s *SessionAffinitySelector) reportBindingKept(ctx context.Context, provide
 	}
 }
 
+// creditOnlyMoveAdvisor is implemented by fallback selectors that rank
+// credit-only credentials last (the expiring-first selector). It returns the
+// candidates to pick a bound thread again from when the bound credential
+// serves only from credits while subscription quota is left in its tier, or
+// nil to keep the binding.
+type creditOnlyMoveAdvisor interface {
+	creditOnlyMoveCandidates(ctx context.Context, provider, model string, bound *Auth, available []*Auth) []*Auth
+}
+
+// creditOnlyMoveCandidates asks the fallback selector whether a binding on a
+// credit-only credential should end.
+func (s *SessionAffinitySelector) creditOnlyMoveCandidates(ctx context.Context, provider, model string, bound *Auth, available []*Auth) []*Auth {
+	if s == nil {
+		return nil
+	}
+	if advisor, ok := s.fallback.(creditOnlyMoveAdvisor); ok {
+		return advisor.creditOnlyMoveCandidates(ctx, provider, model, bound, available)
+	}
+	return nil
+}
+
 // Trees returns a backward-compatible in-memory session tree store.
 // Deprecated: Session tree management has moved to Home.
 func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeStore {
@@ -1071,6 +1092,19 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				if candidates := s.creditOnlyMoveCandidates(ctx, provider, model, auth, available); len(candidates) > 0 {
+					// The bound credential would spend credits while its tier
+					// still has subscription quota: end the binding and pick again.
+					moved, errMove := s.fallback.Pick(ctx, provider, model, opts, candidates)
+					if errMove == nil && moved != nil {
+						if moved.ID != auth.ID {
+							logBindingEnded(ctx, primaryID, auth.ID, auth.Provider, model, bindingEndSubscriptionExhausted)
+							entry.Infof("session-affinity: bound auth serves only from credits, reselected | session=%s bound=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, moved.ID, provider, model)
+						}
+						bind(moved.ID)
+						return moved, nil
+					}
+				}
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				s.reportBindingKept(ctx, provider, model, primaryID, auth)
@@ -1103,6 +1137,16 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
 					if !isSubagent || s.subagentAffinity {
+						if candidates := s.creditOnlyMoveCandidates(ctx, provider, model, auth, available); len(candidates) > 0 {
+							// Don't follow the parent onto credits while its tier
+							// still has subscription quota: bind this thread cold.
+							picked, errPick := s.fallback.Pick(ctx, provider, model, opts, candidates)
+							if errPick == nil && picked != nil {
+								bind(picked.ID)
+								entry.Infof("session-affinity: parent auth serves only from credits, new binding | session=%s fallback=%s parent_auth=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, picked.ID, provider, model)
+								return picked, nil
+							}
+						}
 						bind(auth.ID)
 						if isFork {
 							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
