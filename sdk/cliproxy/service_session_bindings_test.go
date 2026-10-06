@@ -15,7 +15,7 @@ func TestServiceRestoresBindingsAtStartupAndSavesThemOnShutdown(t *testing.T) {
 	cfg := &config.Config{AuthDir: authDir}
 	cfg.Routing.SessionAffinity = true
 
-	manager := coreauth.NewManager(nil, newRoutingSelector(normalizedRoutingRuntimeState(cfg)), nil)
+	manager := coreauth.NewManager(nil, newRoutingSelector(normalizedRoutingRuntimeState(cfg), nil), nil)
 	if _, errRegister := manager.Register(coreauth.WithSkipPersist(ctx), &coreauth.Auth{ID: "codex-a", Provider: "codex", Status: coreauth.StatusActive}); errRegister != nil {
 		t.Fatal(errRegister)
 	}

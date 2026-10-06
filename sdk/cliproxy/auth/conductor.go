@@ -8,6 +8,7 @@ import (
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -149,16 +150,18 @@ type Manager struct {
 	executors                 map[string]ProviderExecutor
 	selector                  Selector
 	hook                      Hook
-	resultPolicy              atomic.Pointer[resultPolicyHolder]
-	mu                        sync.RWMutex
-	selectorMu                sync.Mutex
-	configCooldownMu          sync.Mutex
-	syncSchedulerMu           sync.Mutex
-	structuralEpoch           atomic.Uint64
-	syncedVersion             atomic.Uint64
-	auths                     map[string]*Auth
-	authEpochs                map[string]uint64
-	scheduler                 *authScheduler
+	// quotaReadings outlives selectors, so a routing hot reload keeps them.
+	quotaReadings    *quotareading.Store
+	resultPolicy     atomic.Pointer[resultPolicyHolder]
+	mu               sync.RWMutex
+	selectorMu       sync.Mutex
+	configCooldownMu sync.Mutex
+	syncSchedulerMu  sync.Mutex
+	structuralEpoch  atomic.Uint64
+	syncedVersion    atomic.Uint64
+	auths            map[string]*Auth
+	authEpochs       map[string]uint64
+	scheduler        *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
@@ -222,6 +225,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		executors:             make(map[string]ProviderExecutor),
 		selector:              selector,
 		hook:                  hook,
+		quotaReadings:         quotareading.NewStore(),
 		auths:                 make(map[string]*Auth),
 		authEpochs:            make(map[string]uint64),
 		homeRuntimeAuths:      make(map[string]map[string]*Auth),
@@ -239,6 +243,15 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
+}
+
+// QuotaReadings returns the manager's quota readings. Response headers feed
+// it in MarkResult; the expiring-first selector reads it.
+func (m *Manager) QuotaReadings() *quotareading.Store {
+	if m == nil {
+		return nil
+	}
+	return m.quotaReadings
 }
 
 // SetResultPolicy sets an execution result policy invoked before in-memory quota mutations and persistence.
