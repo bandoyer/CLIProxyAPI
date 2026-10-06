@@ -29,6 +29,7 @@ func (s *Service) startUsagePoller(ctx context.Context) {
 		Fetchers: []usagepoll.Fetcher{
 			usagepoll.NewCodexFetcher(s.coreManager, ""),
 			usagepoll.NewClaudeFetcher(s.coreManager, ""),
+			usagepoll.NewXAIFetcher(s.coreManager, ""),
 		},
 	})
 	go poller.Run(pollCtx, usagepoll.DefaultCheckInterval)
