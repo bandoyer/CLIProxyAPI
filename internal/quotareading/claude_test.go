@@ -16,6 +16,12 @@ func TestParseClaudeHeaderSignals(t *testing.T) {
 	sevenDay := func(shareLeft float64) Reading {
 		return Reading{Window: ClaudeSevenDayWindow, Kind: KindRanking, Length: 7 * 24 * time.Hour, ShareLeft: shareLeft, ResetAt: sevenDayReset, LearnedAt: learnedAt, Source: SourceHeader}
 	}
+	extraUsage := func(shareLeft float64) Reading {
+		return Reading{Window: ClaudeExtraUsageWindow, Kind: KindCredit, ShareLeft: shareLeft, LearnedAt: learnedAt, Source: SourceHeader}
+	}
+	fableSevenDay := func(shareLeft float64) Reading {
+		return Reading{Window: "claude-fable/seven_day", Kind: KindPerModel, Model: "claude-fable", Length: 7 * 24 * time.Hour, ShareLeft: shareLeft, ResetAt: sevenDayReset, LearnedAt: learnedAt, Source: SourceHeader}
+	}
 
 	tests := []struct {
 		name    string
@@ -38,7 +44,7 @@ func TestParseClaudeHeaderSignals(t *testing.T) {
 				"Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": "org_level_disabled",
 				"Anthropic-Ratelimit-Unified-Reset":                   "1790980200",
 			},
-			want: []Reading{fiveHour(0.76), sevenDay(0.56)},
+			want: []Reading{fiveHour(0.76), sevenDay(0.56), extraUsage(0)},
 		},
 		{
 			name: "header names in any case",
@@ -111,6 +117,70 @@ func TestParseClaudeHeaderSignals(t *testing.T) {
 				"Anthropic-Ratelimit-Unified-7d-Reset":       "soon",
 			},
 			want: []Reading{{Window: ClaudeSevenDayWindow, Kind: KindRanking, Length: 7 * 24 * time.Hour, ShareLeft: 0.5, LearnedAt: learnedAt, Source: SourceHeader}},
+		},
+		{
+			name: "Fable 7-day window is a per-model reading",
+			signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-7d_oi-Status":      "allowed",
+				"Anthropic-Ratelimit-Unified-7d_oi-Utilization": "0.3",
+				"Anthropic-Ratelimit-Unified-7d_oi-Reset":       "1791381600",
+			},
+			want: []Reading{fableSevenDay(0.7)},
+		},
+		{
+			name: "rejected Fable 7-day window is exhausted",
+			signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-Status":            "rejected",
+				"Anthropic-Ratelimit-Unified-5h-Status":         "allowed",
+				"Anthropic-Ratelimit-Unified-5h-Utilization":    "0.24",
+				"Anthropic-Ratelimit-Unified-5h-Reset":          "1790980200",
+				"Anthropic-Ratelimit-Unified-7d-Status":         "allowed",
+				"Anthropic-Ratelimit-Unified-7d-Utilization":    "0.44",
+				"Anthropic-Ratelimit-Unified-7d-Reset":          "1791381600",
+				"Anthropic-Ratelimit-Unified-7d_oi-Status":      "rejected",
+				"Anthropic-Ratelimit-Unified-7d_oi-Utilization": "1.02",
+				"Anthropic-Ratelimit-Unified-7d_oi-Reset":       "1791381600",
+			},
+			want: []Reading{fiveHour(0.76), sevenDay(0.56), fableSevenDay(0)},
+		},
+		{
+			name: "allowed overage is extra usage left while the five-hour window is used up",
+			signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-Status":            "allowed",
+				"Anthropic-Ratelimit-Unified-5h-Status":         "rejected",
+				"Anthropic-Ratelimit-Unified-5h-Reset":          "1790980200",
+				"Anthropic-Ratelimit-Unified-Overage-Status":    "allowed",
+				"Anthropic-Ratelimit-Unified-Overage-Something": "ignored",
+			},
+			want: []Reading{fiveHour(0), extraUsage(1)},
+		},
+		{
+			name: "overage in its warning band is extra usage left",
+			signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-Overage-Status": "allowed_warning",
+			},
+			want: []Reading{extraUsage(1)},
+		},
+		{
+			name: "rejected overage is no extra usage left",
+			signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-Overage-Status": "rejected",
+			},
+			want: []Reading{extraUsage(0)},
+		},
+		{
+			name: "a disabled reason without a status is no extra usage left",
+			signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": "member_zero_credit_limit",
+			},
+			want: []Reading{extraUsage(0)},
+		},
+		{
+			name: "unknown overage status gives no extra usage reading",
+			signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-Overage-Status": "paused",
+			},
+			want: nil,
 		},
 		{
 			name:    "no Claude signals",
