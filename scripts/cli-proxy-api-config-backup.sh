@@ -11,14 +11,7 @@
 # Only config.yaml is backed up. Credentials are not, because their refresh
 # tokens rotate.
 #
-# Install (go-live):
-#   ln -s "$PWD/scripts/config-backup.sh" ~/.local/bin/cli-proxy-api-config-backup
-#   ln -s "$PWD"/scripts/systemd/cli-proxy-api-config-backup.{path,service} ~/.config/systemd/user/
-#   # Service account token for the CLIProxyAPI vault only:
-#   (umask 077 && cat >~/.config/cli-proxy-api/config-backup.token)
-#   systemctl --user daemon-reload
-#   systemctl --user enable --now cli-proxy-api-config-backup.path
-#   systemctl --user start cli-proxy-api-config-backup.service  # first backup
+# Install steps are in scripts/README.md.
 #
 # Settings (environment, all optional; ~/.config and ~/.local/state follow
 # XDG_CONFIG_HOME and XDG_STATE_HOME when set):

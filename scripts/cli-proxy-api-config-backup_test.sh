@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Tests for config-backup.sh. Runs the script the way the systemd service
+# Tests for cli-proxy-api-config-backup.sh. Runs the script the way the systemd service
 # does, with a fake HOME and stub `op` and `sleep` commands on PATH, so no
 # real 1Password call and no wall-clock wait happens.
 #
-# Usage: scripts/config-backup.test.sh
+# Usage: scripts/cli-proxy-api-config-backup_test.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKUP_SCRIPT="$SCRIPT_DIR/config-backup.sh"
+BACKUP_SCRIPT="$SCRIPT_DIR/cli-proxy-api-config-backup.sh"
 
 SECRET_TOKEN='ops_TEST-SERVICE-ACCOUNT-TOKEN-xyz'
 CONFIG_V1='remote-management:
