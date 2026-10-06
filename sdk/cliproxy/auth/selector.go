@@ -914,6 +914,7 @@ type SessionAffinitySelector struct {
 	cache            *SessionCache
 	matcher          *cliproxysession.MerklePrefixMatcher
 	subagentAffinity bool
+	nowFunc          func() time.Time
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -921,6 +922,10 @@ type SessionAffinityConfig struct {
 	Fallback         Selector
 	TTL              time.Duration
 	SubagentAffinity *bool
+	// NowFunc is the clock that binding expiry, sliding refresh, the LCP matcher
+	// and the selector's availability checks read. Nil means time.Now. Tests
+	// inject a controllable clock here instead of sleeping.
+	NowFunc func() time.Time
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -943,12 +948,25 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 	if cfg.SubagentAffinity != nil {
 		subagentAffinity = *cfg.SubagentAffinity
 	}
+	nowFunc := cfg.NowFunc
+	if nowFunc == nil {
+		nowFunc = time.Now
+	}
 	return &SessionAffinitySelector{
 		fallback:         cfg.Fallback,
-		cache:            NewSessionCache(cfg.TTL),
-		matcher:          cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
+		cache:            newSessionCache(cfg.TTL, defaultMaxSessionEntries, nowFunc),
+		matcher:          cliproxysession.NewMerklePrefixMatcherWithConfig(cliproxysession.MerklePrefixMatcherConfig{TTL: cfg.TTL, NowFunc: nowFunc}),
 		subagentAffinity: subagentAffinity,
+		nowFunc:          nowFunc,
 	}
+}
+
+// now returns the selector's current time from its injected clock.
+func (s *SessionAffinitySelector) now() time.Time {
+	if s != nil && s.nowFunc != nil {
+		return s.nowFunc()
+	}
+	return time.Now()
 }
 
 // Trees returns a backward-compatible in-memory session tree store.
@@ -1013,7 +1031,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = primaryID
 		}
 	}
-	now := time.Now()
+	now := s.now()
 	availabilityCandidates := auths
 	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
 		availabilityCandidates = positiveWeightAuths(auths)
@@ -1138,7 +1156,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
-	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, time.Now())
+	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, s.now())
 	if errAvailable != nil {
 		return nil, true, errAvailable
 	}
