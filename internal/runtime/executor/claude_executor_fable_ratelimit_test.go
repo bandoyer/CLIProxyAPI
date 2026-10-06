@@ -268,7 +268,9 @@ func TestClaudeExecutor_AuthManager_FableOnlyRejectionDoesNotBlockOpus(t *testin
 		t.Fatalf("Fable upstream attempts = %d, want 1", got)
 	}
 
-	// Verify that Fable model state cooldown is driven by Retry-After (~120s) and not 7 days.
+	// The rejected 7d_oi headers are the Fable 7-day window's quota reading
+	// (claude-fable/seven_day), so the Fable model stays blocked until that
+	// window resets, the same mark the usage poller's Fable reading sets.
 	updatedAuth, ok := manager.GetByID(auth.ID)
 	if !ok || updatedAuth == nil {
 		t.Fatal("auth not found")
@@ -277,8 +279,8 @@ func TestClaudeExecutor_AuthManager_FableOnlyRejectionDoesNotBlockOpus(t *testin
 	if fableState == nil {
 		t.Fatal("fable model state not found")
 	}
-	if fableState.Quota.NextRecoverAt.After(time.Now().Add(5 * time.Minute)) {
-		t.Fatalf("fable model state cooldown too long: NextRecoverAt = %v (want ~120s, not 7 days)", fableState.Quota.NextRecoverAt)
+	if want := time.Unix(reset, 0); !fableState.Quota.NextRecoverAt.Equal(want) {
+		t.Fatalf("fable model state NextRecoverAt = %v, want the Fable window's reset %v", fableState.Quota.NextRecoverAt, want)
 	}
 
 	payloadOpus := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":[{"type":"text","text":"test"}]}]}`)

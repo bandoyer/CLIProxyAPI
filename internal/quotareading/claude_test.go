@@ -16,6 +16,9 @@ func TestParseClaudeHeaderSignals(t *testing.T) {
 	sevenDay := func(shareLeft float64) Reading {
 		return Reading{Window: ClaudeSevenDayWindow, Kind: KindRanking, Length: 7 * 24 * time.Hour, ShareLeft: shareLeft, ResetAt: sevenDayReset, LearnedAt: learnedAt, Source: SourceHeader}
 	}
+	fableSevenDay := func(shareLeft float64) Reading {
+		return Reading{Window: "claude-fable/seven_day", Kind: KindPerModel, Model: "claude-fable", Length: 7 * 24 * time.Hour, ShareLeft: shareLeft, ResetAt: sevenDayReset, LearnedAt: learnedAt, Source: SourceHeader}
+	}
 
 	tests := []struct {
 		name    string
@@ -111,6 +114,31 @@ func TestParseClaudeHeaderSignals(t *testing.T) {
 				"Anthropic-Ratelimit-Unified-7d-Reset":       "soon",
 			},
 			want: []Reading{{Window: ClaudeSevenDayWindow, Kind: KindRanking, Length: 7 * 24 * time.Hour, ShareLeft: 0.5, LearnedAt: learnedAt, Source: SourceHeader}},
+		},
+		{
+			name: "Fable 7-day window is a per-model reading",
+			signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-7d_oi-Status":      "allowed",
+				"Anthropic-Ratelimit-Unified-7d_oi-Utilization": "0.3",
+				"Anthropic-Ratelimit-Unified-7d_oi-Reset":       "1791381600",
+			},
+			want: []Reading{fableSevenDay(0.7)},
+		},
+		{
+			name: "rejected Fable 7-day window is exhausted",
+			signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-Status":            "rejected",
+				"Anthropic-Ratelimit-Unified-5h-Status":         "allowed",
+				"Anthropic-Ratelimit-Unified-5h-Utilization":    "0.24",
+				"Anthropic-Ratelimit-Unified-5h-Reset":          "1790980200",
+				"Anthropic-Ratelimit-Unified-7d-Status":         "allowed",
+				"Anthropic-Ratelimit-Unified-7d-Utilization":    "0.44",
+				"Anthropic-Ratelimit-Unified-7d-Reset":          "1791381600",
+				"Anthropic-Ratelimit-Unified-7d_oi-Status":      "rejected",
+				"Anthropic-Ratelimit-Unified-7d_oi-Utilization": "1.02",
+				"Anthropic-Ratelimit-Unified-7d_oi-Reset":       "1791381600",
+			},
+			want: []Reading{fiveHour(0.76), sevenDay(0.56), fableSevenDay(0)},
 		},
 		{
 			name:    "no Claude signals",
