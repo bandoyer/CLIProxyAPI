@@ -1,0 +1,12 @@
+# Starts cli-proxy-api-config-backup.service when config.yaml changes.
+# PathChanged fires when a writer closes the file, so a partial write does
+# not start a backup; the service's debounce absorbs bursts of writes.
+[Unit]
+Description=Watch CLIProxyAPI config.yaml for 1Password backup
+
+[Path]
+PathChanged=%h/.config/cli-proxy-api/config.yaml
+Unit=cli-proxy-api-config-backup.service
+
+[Install]
+WantedBy=default.target

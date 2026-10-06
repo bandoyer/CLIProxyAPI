@@ -378,6 +378,7 @@ func (m *Manager) Load(ctx context.Context) error {
 	if m.authEpochs == nil {
 		m.authEpochs = make(map[string]uint64, len(items))
 	}
+	var websocketsOffIDs []string
 	for _, auth := range items {
 		if auth == nil || auth.ID == "" {
 			continue
@@ -391,6 +392,9 @@ func (m *Manager) Load(ctx context.Context) error {
 		auth.RegistrationEpoch = m.authEpochs[auth.ID]
 		auth.Generation = 1
 		m.auths[auth.ID] = auth.Clone()
+		if codexWebsocketsTurnedOff(auth) {
+			websocketsOffIDs = append(websocketsOffIDs, auth.ID)
+		}
 	}
 
 	type removalTombstone struct {
@@ -414,6 +418,8 @@ func (m *Manager) Load(ctx context.Context) error {
 	}
 	m.rebuildAPIKeyModelAliasLocked(cfg)
 	m.mu.Unlock()
+
+	warnCodexWebsocketsTurnedOff(websocketsOffIDs)
 
 	if m.scheduler != nil {
 		for _, rt := range removedTombstones {
