@@ -1796,7 +1796,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return nil, nil, errPick
 	}
 	if !handled {
-		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
+		selectorCtx := m.withBindingEndReasons(selectorContextForAvailableAuths(ctx, selector, model))
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
@@ -2130,7 +2130,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", errPick
 	}
 	if !handled {
-		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
+		selectorCtx := m.withBindingEndReasons(selectorContextForAvailableAuths(ctx, selector, model))
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
