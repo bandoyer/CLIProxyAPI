@@ -51,3 +51,9 @@ _Avoid_: score, burn rate, pace
 **Cache write**:
 A request that makes the provider store a new prompt prefix for reuse, instead of reading one it already stored.
 _Avoid_: cache miss, re-read
+
+### Requests
+
+**Cloaking**:
+The proxy rewriting a request from a client that isn't Claude Code so that it reaches the provider looking like a Claude Code request. A request from Claude Code itself passes through unchanged.
+_Avoid_: disguise, spoofing
