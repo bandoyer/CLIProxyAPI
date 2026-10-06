@@ -1,0 +1,14 @@
+# Backs up config.yaml to the CLIProxyAPI 1Password vault.
+# Started by cli-proxy-api-config-backup.path; see scripts/cli-proxy-api-config-backup.sh.
+# A failed upload is retried every 5 minutes until it succeeds; the monitor
+# reports a stale backup in the meantime.
+[Unit]
+Description=Back up CLIProxyAPI config.yaml to 1Password
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/cli-proxy-api-config-backup
+Environment=CONFIG_BACKUP_DEBOUNCE_SECONDS=10
+UMask=0077
+Restart=on-failure
+RestartSec=5min
