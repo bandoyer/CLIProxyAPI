@@ -3,6 +3,7 @@ package misc
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -19,6 +20,23 @@ func LogSavingCredentials(path string) {
 	}
 	// Use filepath.Clean so logs remain stable even if callers pass redundant separators.
 	fmt.Printf("Saving credentials to %s\n", filepath.Clean(path))
+}
+
+// CreateCredentialFile opens path for writing credential data with mode 0600,
+// creating or truncating it. The mode is applied explicitly so it holds whatever
+// the umask is, and an existing file left readable by others is tightened.
+func CreateCredentialFile(path string) (*os.File, error) {
+	f, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if errOpen != nil {
+		return nil, errOpen
+	}
+	if errChmod := f.Chmod(0o600); errChmod != nil {
+		if errClose := f.Close(); errClose != nil {
+			log.Errorf("credential file: close after chmod failure: %v", errClose)
+		}
+		return nil, fmt.Errorf("set credential file mode: %w", errChmod)
+	}
+	return f, nil
 }
 
 // LogCredentialSeparator adds a visual separator to group auth/key processing logs.
