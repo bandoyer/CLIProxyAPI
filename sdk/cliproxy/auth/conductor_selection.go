@@ -428,6 +428,13 @@ func (m *Manager) SetSelector(selector Selector) {
 		m.mu.Unlock()
 		return
 	}
+	// A routing hot reload rebuilds the affinity selector; carry the warm
+	// bindings over so threads keep their credential. Expired ones are dropped.
+	if oldHolder, ok := oldSelector.(sessionBindingHolder); ok {
+		if newHolder, okNew := selector.(sessionBindingHolder); okNew {
+			newHolder.restoreSessionBindings(oldHolder.sessionBindings())
+		}
+	}
 	m.selector = selector
 	m.mu.Unlock()
 
@@ -662,7 +669,9 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 func selectorContextForAvailableAuths(ctx context.Context, selector Selector, routeModel string) context.Context {
 	ctx = withWeightedSelectorStateModel(ctx, selector, routeModel)
 	if !isBuiltInSelector(selector) {
-		if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
+		switch selector.(type) {
+		case *SessionAffinitySelector, *ExpiringFirstSelector:
+		default:
 			return ctx
 		}
 	}

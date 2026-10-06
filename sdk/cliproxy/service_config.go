@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -46,6 +47,8 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "weighted-round-robin"
 	case "fill-first", "fillfirst", "ff":
 		state.strategy = "fill-first"
+	case "expiring-first", "expiringfirst", "ef":
+		state.strategy = "expiring-first"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -62,13 +65,17 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	return state
 }
 
-func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
+// newRoutingSelector builds the configured selector. readings is the
+// manager's quota-reading store, which expiring-first routing ranks by.
+func newRoutingSelector(state routingRuntimeState, readings *quotareading.Store) coreauth.Selector {
 	var selector coreauth.Selector
 	switch state.strategy {
 	case "weighted-round-robin":
 		selector = &coreauth.WeightedRoundRobinSelector{}
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
+	case "expiring-first":
+		selector = coreauth.NewExpiringFirstSelector(coreauth.ExpiringFirstConfig{Readings: readings})
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}
@@ -215,7 +222,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
-		s.coreManager.SetSelector(newRoutingSelector(routingState))
+		s.coreManager.SetSelector(newRoutingSelector(routingState, s.coreManager.QuotaReadings()))
 		s.appliedRoutingState = &routingState
 	}
 	s.applyRetryConfig(commit.cfg)

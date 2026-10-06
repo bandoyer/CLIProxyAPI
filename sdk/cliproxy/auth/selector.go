@@ -411,35 +411,7 @@ func canonicalModelKey(model string) string {
 }
 
 func authWebsocketsEnabled(auth *Auth) bool {
-	if auth == nil {
-		return false
-	}
-	if len(auth.Attributes) > 0 {
-		if raw := strings.TrimSpace(auth.Attributes["websockets"]); raw != "" {
-			parsed, errParse := strconv.ParseBool(raw)
-			if errParse == nil {
-				return parsed
-			}
-		}
-	}
-	if len(auth.Metadata) == 0 {
-		return false
-	}
-	raw, ok := auth.Metadata["websockets"]
-	if !ok || raw == nil {
-		return false
-	}
-	switch v := raw.(type) {
-	case bool:
-		return v
-	case string:
-		parsed, errParse := strconv.ParseBool(strings.TrimSpace(v))
-		if errParse == nil {
-			return parsed
-		}
-	default:
-	}
-	return false
+	return auth.WebsocketsEnabled()
 }
 
 func preferCodexWebsocketAuths(ctx context.Context, provider string, available []*Auth) []*Auth {
@@ -915,6 +887,11 @@ type SessionAffinitySelector struct {
 	matcher          *cliproxysession.MerklePrefixMatcher
 	subagentAffinity bool
 	nowFunc          func() time.Time
+
+	// detours holds bindings whose credential is recovering from an upstream
+	// overload (5xx or 529), keyed by binding cache key.
+	detourMu sync.Mutex
+	detours  map[string]affinityDetour
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -967,6 +944,22 @@ func (s *SessionAffinitySelector) now() time.Time {
 		return s.nowFunc()
 	}
 	return time.Now()
+}
+
+// bindingKeptObserver is implemented by fallback selectors that log picks
+// affinity served from an existing binding (the expiring-first selector).
+type bindingKeptObserver interface {
+	observeBindingKept(ctx context.Context, provider, model, thread string, auth *Auth)
+}
+
+// reportBindingKept tells the fallback selector that a binding served a pick.
+func (s *SessionAffinitySelector) reportBindingKept(ctx context.Context, provider, model, thread string, auth *Auth) {
+	if s == nil {
+		return
+	}
+	if observer, ok := s.fallback.(bindingKeptObserver); ok {
+		observer.observeBindingKept(ctx, provider, model, thread, auth)
+	}
 }
 
 // Trees returns a backward-compatible in-memory session tree store.
@@ -1079,6 +1072,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			if auth.ID == cachedAuthID {
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+				s.reportBindingKept(ctx, provider, model, primaryID, auth)
 				return auth, nil
 			}
 		}
@@ -1089,6 +1083,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		if auth == nil {
 			return nil, nil
+		}
+		if s.detourActive(cacheKey, cachedAuthID) {
+			// The bound credential is recovering from an upstream overload: serve
+			// this request elsewhere and keep the binding on the warm credential.
+			entry.Infof("session-affinity: bound auth recovering from upstream overload, detour without rebinding | session=%s bound=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
+			return auth, nil
 		}
 		bind(auth.ID)
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
@@ -1106,6 +1106,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 						} else {
 							entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						}
+						s.reportBindingKept(ctx, provider, model, primaryID, auth)
 						return auth, nil
 					}
 				}
@@ -1200,6 +1201,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				}
 				entry.Infof("session-affinity: LCP cache hit | session=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.PrefixLength, auth.ID, provider, model)
 			}
+			s.reportBindingKept(ctx, provider, model, match.SessionID, auth)
 			return auth, true, nil
 		}
 	}
@@ -1356,6 +1358,23 @@ func (s *SessionAffinitySelector) Stop() {
 	if s.matcher != nil {
 		s.matcher.Clear()
 	}
+}
+
+// sessionBindings returns the selector's unexpired bindings for persistence.
+// LCP matcher state is not included; it only serves requests without a thread identifier.
+func (s *SessionAffinitySelector) sessionBindings() []SessionBindingRecord {
+	if s == nil {
+		return nil
+	}
+	return s.cache.snapshot()
+}
+
+// restoreSessionBindings loads persisted bindings and returns how many were kept.
+func (s *SessionAffinitySelector) restoreSessionBindings(records []SessionBindingRecord) int {
+	if s == nil {
+		return 0
+	}
+	return s.cache.restore(records)
 }
 
 // InvalidateAuth removes all session bindings for a specific auth.
@@ -1556,16 +1575,35 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
 	}
 	if res.Success {
-		s.cache.Touch(cacheKey, res.AuthID)
-		if fallbackKey != "" {
-			s.cache.Touch(fallbackKey, res.AuthID)
+		// A success on a detour credential matches no binding, so Touch leaves
+		// the binding on the warm credential. A success on the bound credential
+		// ends any detour.
+		if s.cache.Touch(cacheKey, res.AuthID) {
+			s.clearDetour(cacheKey)
+		}
+		if fallbackKey != "" && s.cache.Touch(fallbackKey, res.AuthID) {
+			s.clearDetour(fallbackKey)
 		}
 		return
 	}
 
-	s.cache.CompareAndDelete(cacheKey, res.AuthID)
-	if fallbackKey != "" {
-		s.cache.CompareAndDelete(fallbackKey, res.AuthID)
+	if isUpstreamOverloadResult(res.Error) {
+		// An upstream 5xx or 529 detours only this request. The binding stays on
+		// the warm credential so the thread returns to it once it is usable.
+		now := s.now()
+		until := now.Add(upstreamOverloadDetourWindow(now, res.RetryAfter))
+		s.markDetour(cacheKey, res.AuthID, until)
+		if fallbackKey != "" {
+			s.markDetour(fallbackKey, res.AuthID, until)
+		}
+		return
+	}
+
+	if s.cache.CompareAndDelete(cacheKey, res.AuthID) {
+		s.clearDetour(cacheKey)
+	}
+	if fallbackKey != "" && s.cache.CompareAndDelete(fallbackKey, res.AuthID) {
+		s.clearDetour(fallbackKey)
 	}
 }
 
