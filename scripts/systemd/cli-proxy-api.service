@@ -1,0 +1,17 @@
+# CLIProxyAPI as a systemd user service. Install and usage: scripts/README.md.
+[Unit]
+Description=CLIProxyAPI proxy
+Documentation=https://github.com/bandoyer/CLIProxyAPI/blob/main/scripts/README.md
+# Notify on every failure. With the default RestartMode=normal the unit
+# passes through the failed state before each automatic restart.
+OnFailure=cli-proxy-api-failure.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.config/cli-proxy-api
+ExecStart=%h/.local/bin/cli-proxy-api --config %h/.config/cli-proxy-api/config.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
