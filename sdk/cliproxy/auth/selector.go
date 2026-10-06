@@ -1330,6 +1330,23 @@ func (s *SessionAffinitySelector) Stop() {
 	}
 }
 
+// sessionBindings returns the selector's unexpired bindings for persistence.
+// LCP matcher state is not included; it only serves requests without a thread identifier.
+func (s *SessionAffinitySelector) sessionBindings() []SessionBindingRecord {
+	if s == nil {
+		return nil
+	}
+	return s.cache.snapshot()
+}
+
+// restoreSessionBindings loads persisted bindings and returns how many were kept.
+func (s *SessionAffinitySelector) restoreSessionBindings(records []SessionBindingRecord) int {
+	if s == nil {
+		return 0
+	}
+	return s.cache.restore(records)
+}
+
 // InvalidateAuth removes all session bindings for a specific auth.
 // Called when an auth becomes rate-limited or unavailable.
 func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
