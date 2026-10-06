@@ -26,6 +26,10 @@ _Avoid_: signal, watermark, snapshot
 The moment a quota window ends and the credential's usage in that window returns to zero.
 _Avoid_: session end, renewal
 
+**Wasted quota**:
+The share of a quota window still left when its reset time arrives, which expiring-first routing exists to keep near zero.
+_Avoid_: leftover quota, unused quota
+
 ### Clients
 
 **Client**:
