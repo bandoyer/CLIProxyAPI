@@ -209,6 +209,35 @@ func TestUsagePollerPollsEveryEnabledCodexCredentialOnceAtStartup(t *testing.T) 
 	}
 }
 
+func TestUsagePollerExhaustedWindowMarksTheCredentialQuotaExceeded(t *testing.T) {
+	h := newCodexPollHarness(t)
+	// The manager's quota-exceeded mark compares the reset time with the wall
+	// clock, so this poll happens at the current time.
+	h.clock.now = time.Now()
+	h.addCodexCredential(t, "codex-a.json", "acct-a")
+	h.upstream.failFor("acct-a", func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"rate_limit": {
+				"allowed": false, "limit_reached": true,
+				"primary_window": {"used_percent": 100, "limit_window_seconds": 604800, "reset_after_seconds": 86400}
+			},
+			"credits": {"has_credits": false, "unlimited": false, "balance": "0"}
+		}`))
+	})
+
+	h.pollDue(t)
+
+	auth, ok := h.manager.GetByID("codex-a.json")
+	if !ok {
+		t.Fatal("credential codex-a.json not found")
+	}
+	wantReset := h.clock.Now().Add(24 * time.Hour)
+	if !auth.Quota.Exceeded || auth.Quota.Reason != "credential_quota" || auth.Quota.NextRecoverAt.Sub(wantReset).Abs() > time.Second {
+		t.Fatalf("quota after polling an exhausted window = %+v, want credential_quota exceeded until %v", auth.Quota, wantReset)
+	}
+}
+
 // recordHeaderReading stands in for a response that served traffic on the
 // credential: the response headers give it a fresh reading at the clock time.
 func (h *codexPollHarness) recordHeaderReading(id string) {
