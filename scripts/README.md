@@ -1,6 +1,6 @@
 # Service scripts
 
-These files run the proxy as a systemd user service, deploy new builds to it, and back up its config.
+These files run the proxy as a systemd user service, deploy new builds to it, back up its config, watch it, and report on its routing.
 
 | File | Purpose |
 |---|---|
@@ -12,6 +12,12 @@ These files run the proxy as a systemd user service, deploy new builds to it, an
 | `cli-proxy-api-config-backup_test.sh` | Tests the backup script against stub `op` and `sleep` commands. It does not call 1Password. |
 | `systemd/cli-proxy-api-config-backup.path` | Starts the backup service when `config.yaml` changes. |
 | `systemd/cli-proxy-api-config-backup.service` | Runs the backup script. It retries a failed upload every 5 minutes. |
+| `cli-proxy-api-monitor.sh` | Checks the proxy and sends a desktop notification for each new problem. |
+| `cli-proxy-api-monitor_test.sh` | Tests the monitor against stub `curl`, `journalctl` and `notify-send` commands. It does not call the live proxy. |
+| `systemd/cli-proxy-api-monitor.service` | Runs the monitor once. |
+| `systemd/cli-proxy-api-monitor.timer` | Starts the monitor service every 5 minutes. |
+| `cli-proxy-api-routing-report.sh` | Prints wasted quota, binding moves and picks for the last N hours of the journal. |
+| `cli-proxy-api-routing-report_test.sh` | Tests the report against a stub `journalctl` command. |
 
 Installed paths:
 
@@ -139,13 +145,92 @@ The backup is stale if the file is missing or its `sha256` is not the same as `s
 | `CONFIG_BACKUP_DEBOUNCE_SECONDS` | `10` |
 | `CONFIG_BACKUP_RECORD` | `~/.local/state/cli-proxy-api/config-backup-last-success` |
 
+## Monitor
+
+Every 5 minutes, the timer runs the monitor. The monitor sends a desktop notification when one of these problems starts:
+
+| Problem | Notification | Check |
+|---|---|---|
+| The proxy is down | `CLIProxyAPI is down` (critical) | `GET http://127.0.0.1:8317/healthz` fails. |
+| A credential needs a re-login | `CLIProxyAPI credential needs a re-login` | In `GET /v8/management/credentials`, the credential has `status` `error`, or it is disabled with a refresh message (`unauthorized`, `invalid grant`, `token expired`). |
+| The config is not backed up | `CLIProxyAPI config not backed up` | `config.yaml` differs from the last-success record of the backup, and the file did not change in the last 5 minutes. |
+| Wasted quota | `CLIProxyAPI wasted quota` | The journal has a `quota window reset` line with `kind=ranking` (the longest window) and `share_left` more than `0.2`. |
+
+These rules prevent repeated notifications:
+
+- A quota cooldown (`status_message` `quota exhausted`, or a cooldown with reason `quota` or `credential_quota`) does not notify. A `transient upstream error` does not notify, because it clears by itself.
+- A wasted-quota alert fires at most once for each credential, window and reset time. The monitor keeps the alerts that it sent in `~/.local/state/cli-proxy-api/monitor/wasted-quota-alerted`.
+- Each other problem notifies once. It notifies again only after it clears and then comes back. The current problems are in `~/.local/state/cli-proxy-api/monitor/problems`.
+- If the proxy is down, the monitor does not read the credentials. The credential problems from the last run stay as they were.
+
+The monitor reads the management key from a file with mode `600`. It gives the key to `curl` on standard input, so the key is not in the process arguments. The monitor never logs the key.
+
+### Install the monitor
+
+1. Save the management key with mode `600`. The proxy stores only a hash of `management.secret-key` in `config.yaml`, so use the plaintext key. Paste the key, then press Ctrl+D:
+
+   ```bash
+   (umask 077 && cat >~/.config/cli-proxy-api/monitor-management.key)
+   ```
+
+2. Install the script and the units, and start the timer:
+
+   ```bash
+   ln -sf "$PWD/scripts/cli-proxy-api-monitor.sh" ~/.local/bin/cli-proxy-api-monitor
+   systemctl --user link "$PWD/scripts/systemd/cli-proxy-api-monitor.service" \
+     "$PWD/scripts/systemd/cli-proxy-api-monitor.timer"
+   systemctl --user enable --now cli-proxy-api-monitor.timer
+   ```
+
+3. Run the monitor once, then look at its log. If there are no problems, it sends no notification and logs nothing:
+
+   ```bash
+   systemctl --user start cli-proxy-api-monitor.service
+   journalctl --user -u cli-proxy-api-monitor.service -o cat | tail -n 5
+   ```
+
+### Monitor overrides
+
+| Variable | Default |
+|---|---|
+| `CLI_PROXY_API_HEALTH_URL` | `http://127.0.0.1:8317/healthz` |
+| `CLI_PROXY_API_CREDENTIALS_URL` | `http://127.0.0.1:8317/v8/management/credentials` |
+| `CLI_PROXY_API_MANAGEMENT_KEY_FILE` | `~/.config/cli-proxy-api/monitor-management.key` |
+| `CLI_PROXY_API_UNIT` | `cli-proxy-api.service` |
+| `CONFIG_BACKUP_FILE`, `CONFIG_BACKUP_RECORD` | As for the backup |
+| `MONITOR_BACKUP_GRACE_SECONDS` | `300` |
+| `MONITOR_JOURNAL_HOURS` | `24` (journal hours searched for reset lines) |
+| `MONITOR_WASTED_QUOTA_THRESHOLD` | `0.2` |
+| `MONITOR_STATE_DIR` | `~/.local/state/cli-proxy-api/monitor` |
+
+## Routing report
+
+Run the report to judge routing after real use. It reads the last N hours (default 24) of the `cli-proxy-api.service` journal:
+
+```bash
+ln -sf "$PWD/scripts/cli-proxy-api-routing-report.sh" ~/.local/bin/cli-proxy-api-routing-report
+cli-proxy-api-routing-report 12
+```
+
+The report has three summaries. A summary with no log lines shows `none`.
+
+- **Wasted quota per credential and window**, from the `quota window reset` lines. `RESETS` is the number of resets. `WASTED` is the total share left at those resets, as a percentage of one window. `LAST` is the share left at the latest reset.
+- **Binding moves per thread**, from the `affinity binding ended` lines. Each row is one ended binding: `FROM` is the credential that the thread left, `TO` is the credential of the thread's next pick, and `REASON` is the reason in the log. `?` means that no pick followed yet. A pick that has no ended binding before it is not a move. Examples are a new thread, or a binding that expired after 1 hour idle.
+- **Picks per credential**, from the `expiring-first pick` lines, with a count for each reason: `more_urgent`, `no_data`, `binding_kept` and `credit_only`. `OTHER` counts picks with any other reason.
+
+The report prints each binding-end reason as it is in the log, so a new reason value needs no change to the report. The reasons are defined in `sdk/cliproxy/auth/session_affinity_binding_end.go`.
+
+Quota readings are kept only in memory. After a restart, a window logs its reset only after a new reading arrives.
+
 ## Test
 
 ```bash
 scripts/cli-proxy-api-deploy_test.sh
 scripts/cli-proxy-api-config-backup_test.sh
+scripts/cli-proxy-api-monitor_test.sh
+scripts/cli-proxy-api-routing-report_test.sh
 shellcheck scripts/*.sh
-systemd-analyze --user verify scripts/systemd/*.service scripts/systemd/*.path
+systemd-analyze --user verify scripts/systemd/*.service scripts/systemd/*.path scripts/systemd/*.timer
 ```
 
-The test builds throwaway git repositories for the proxy and the panel fork, and puts stubs for `go`, `bun`, `systemctl`, `curl`, `journalctl`, `notify-send` and `sleep` first on `PATH`. `systemd-analyze verify` reports that `~/.local/bin/cli-proxy-api` is missing until the first deploy, and that `~/.local/bin/cli-proxy-api-config-backup` is missing until the backup is installed.
+The tests use a fake `HOME` and put stub commands first on `PATH`: `go`, `bun`, `systemctl`, `curl`, `journalctl`, `notify-send`, `op` and `sleep`, as each script needs. The deploy test also builds throwaway git repositories for the proxy and the panel fork. `systemd-analyze verify` reports that `~/.local/bin/cli-proxy-api` is missing until the first deploy, and that `~/.local/bin/cli-proxy-api-config-backup` and `~/.local/bin/cli-proxy-api-monitor` are missing until they are installed.
