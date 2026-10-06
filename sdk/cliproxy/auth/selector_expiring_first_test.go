@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -160,6 +161,58 @@ func TestExpiringFirstWarmThreadKeepsBindingWhenAnotherCredentialIsMoreUrgent(t 
 	}
 	if got := executeClaudeThread(t, manager, "new-thread"); got != urgent {
 		t.Fatalf("new thread: credential = %s, want the now more urgent %s", got, urgent)
+	}
+}
+
+func TestExpiringFirstClaudeResponseHeadersSteerTheNextNewThread(t *testing.T) {
+	clock := newAffinityTestClock()
+	lessUrgent, moreUrgent := "ef-1-"+t.Name(), "ef-2-"+t.Name()
+	manager := newExpiringFirstManager(t, clock, lessUrgent, moreUrgent)
+	// Each credential's upstream answers with its own Claude unified headers.
+	// Reset times are relative to the wall clock because MarkResult learns
+	// readings on it; the selector's clock is set to match below.
+	wallNow := time.Now()
+	clock.Advance(wallNow.Sub(clock.Now()))
+	headers := map[string]http.Header{
+		lessUrgent: claudeUnifiedHeaders(0.10, wallNow.Add(4*24*time.Hour)), // 90% left in 4 days
+		moreUrgent: claudeUnifiedHeaders(0.60, wallNow.Add(3*time.Hour)),    // 40% left in 3 hours
+	}
+	manager.RegisterExecutor(&mockCustomErrorExecutor{
+		identifier: "claude",
+		executeFn: func(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			internallogging.SetResponseHeaders(ctx, headers[auth.ID])
+			return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
+		},
+	})
+
+	// One pinned request per credential stands in for earlier traffic.
+	for _, credential := range []string{lessUrgent, moreUrgent} {
+		opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: credential}}
+		if _, errExecute := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: expiringFirstTestModel}, opts); errExecute != nil {
+			t.Fatalf("execute pinned to %s: %v", credential, errExecute)
+		}
+	}
+	readings := manager.QuotaReadings().Readings(moreUrgent, expiringFirstTestModel)
+	if len(readings) != 2 {
+		t.Fatalf("readings learned from headers = %+v, want the five-hour and seven-day windows", readings)
+	}
+
+	for _, thread := range []string{"thread-1", "thread-2"} {
+		if got := executeClaudeThread(t, manager, thread); got != moreUrgent {
+			t.Fatalf("%s: credential = %s, want %s, more urgent by its response headers", thread, got, moreUrgent)
+		}
+	}
+}
+
+func claudeUnifiedHeaders(sevenDayUsed float64, sevenDayReset time.Time) http.Header {
+	return http.Header{
+		"Anthropic-Ratelimit-Unified-Status":         []string{"allowed"},
+		"Anthropic-Ratelimit-Unified-5h-Status":      []string{"allowed"},
+		"Anthropic-Ratelimit-Unified-5h-Utilization": []string{"0.05"},
+		"Anthropic-Ratelimit-Unified-5h-Reset":       []string{strconv.FormatInt(sevenDayReset.Add(-time.Hour).Unix(), 10)},
+		"Anthropic-Ratelimit-Unified-7d-Status":      []string{"allowed"},
+		"Anthropic-Ratelimit-Unified-7d-Utilization": []string{strconv.FormatFloat(sevenDayUsed, 'f', 2, 64)},
+		"Anthropic-Ratelimit-Unified-7d-Reset":       []string{strconv.FormatInt(sevenDayReset.Unix(), 10)},
 	}
 }
 
