@@ -35,6 +35,11 @@ var claudeHeaderWindows = []struct {
 // 7-day (per-model) windows. Utilization is the used fraction (0-1); reset
 // times are unix seconds. A window whose status is "rejected" is exhausted. A
 // window without a usable utilization and not rejected gives no reading.
+//
+// The overage headers give the extra_usage credit reading (the usage body's
+// window of that name): share 1 when the overage status is "allowed" or
+// "allowed_warning", 0 when it is "rejected" or, with no status, when an
+// overage-disabled reason is set. Without those headers there is no reading.
 func ParseClaudeHeaderSignals(signals map[string]string, learnedAt time.Time) []Reading {
 	if len(signals) == 0 {
 		return nil
@@ -67,7 +72,32 @@ func ParseClaudeHeaderSignals(signals map[string]string, learnedAt time.Time) []
 			Source:    SourceHeader,
 		})
 	}
+	if shareLeft, ok := claudeOverageShareLeft(lower["overage-status"], lower["overage-disabled-reason"]); ok {
+		readings = append(readings, Reading{
+			Window:    ClaudeExtraUsageWindow,
+			Kind:      KindCredit,
+			ShareLeft: shareLeft,
+			LearnedAt: learnedAt,
+			Source:    SourceHeader,
+		})
+	}
 	return readings
+}
+
+// claudeOverageShareLeft reads whether Claude would serve the credential from
+// extra usage (overage): 1 when it would, 0 when it would not.
+func claudeOverageShareLeft(status, disabledReason string) (float64, bool) {
+	switch strings.ToLower(status) {
+	case "allowed", "allowed_warning":
+		return 1, true
+	case "rejected":
+		return 0, true
+	case "":
+		if disabledReason != "" {
+			return 0, true
+		}
+	}
+	return 0, false
 }
 
 func claudeShareLeft(utilization, status string) (float64, bool) {

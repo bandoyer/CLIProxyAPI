@@ -75,3 +75,69 @@ func TestFableResponseHeadersMoveOnlyFableThreads(t *testing.T) {
 		t.Fatalf("%s requests sent to the exhausted credential = %d, want 1", fableModel, got)
 	}
 }
+
+// A Claude account with extra usage on keeps serving after its five-hour
+// window is used up: Claude serves it from overage. Its headers make it
+// credit-only (ranked last), not blocked. With overage rejected it is blocked.
+func TestClaudeOverageHeadersDecideWhetherAnExhaustedCredentialServesFromCredit(t *testing.T) {
+	tests := []struct {
+		name          string
+		overageStatus string
+		wantUsable    bool
+	}{
+		{name: "overage allowed", overageStatus: "allowed", wantUsable: true},
+		{name: "overage allowed with warning", overageStatus: "allowed_warning", wantUsable: true},
+		{name: "overage rejected", overageStatus: "rejected", wantUsable: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			overage, fresh := "qm-overage-"+t.Name(), "qm-fresh-"+t.Name()
+			manager, clock, _ := newQuotaMarkManager(t, overage, fresh)
+			recordSevenDay(manager, clock, overage, 0.40, 3*time.Hour)
+			recordSevenDay(manager, clock, fresh, 0.90, 4*24*time.Hour)
+			executor, served := claudeHeadersExecutor(map[string]func() http.Header{
+				overage: func() http.Header {
+					headers := claudeUnifiedHeaders(0.60, clock.Now().Add(3*time.Hour))
+					headers.Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")
+					headers.Set("Anthropic-Ratelimit-Unified-5h-Utilization", "1.0")
+					headers.Set("Anthropic-Ratelimit-Unified-5h-Reset", strconv.FormatInt(clock.Now().Add(2*time.Hour).Unix(), 10))
+					headers.Set("Anthropic-Ratelimit-Unified-Overage-Status", tc.overageStatus)
+					if tc.overageStatus == "rejected" {
+						headers.Set("Anthropic-Ratelimit-Unified-Overage-Disabled-Reason", "org_spend_cap_reached")
+					}
+					return headers
+				},
+			})
+			manager.RegisterExecutor(executor)
+			// One pinned request stands in for the traffic that used up the window.
+			pinned := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: overage}}
+			if _, errExecute := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: expiringFirstTestModel}, pinned); errExecute != nil {
+				t.Fatalf("execute pinned to %s: %v", overage, errExecute)
+			}
+
+			if got := executeClaudeThread(t, manager, "thread-1"); got != fresh {
+				t.Fatalf("new thread: credential = %s, want %s ahead of the credential with its window used up", got, fresh)
+			}
+
+			// The other credential's window is used up too, with no credit.
+			recordQuotaReading(manager, clock, fresh, exhaustedFiveHourWindow(clock, time.Hour))
+			opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"thread-2"}}, Metadata: map[string]any{}}
+			response, errExecute := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: expiringFirstTestModel}, opts)
+			if !tc.wantUsable {
+				if errExecute == nil {
+					t.Fatalf("new thread: credential = %s, want no usable credential", string(response.Payload))
+				}
+				if got := served(overage, expiringFirstTestModel); got != 1 {
+					t.Fatalf("requests sent to the blocked credential = %d, want 1", got)
+				}
+				return
+			}
+			if errExecute != nil {
+				t.Fatalf("new thread: %v, want %s served from extra usage", errExecute, overage)
+			}
+			if got := string(response.Payload); got != overage {
+				t.Fatalf("new thread: credential = %s, want %s served from extra usage", got, overage)
+			}
+		})
+	}
+}
