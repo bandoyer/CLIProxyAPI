@@ -456,6 +456,11 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 					fileData["note"] = trimmed
 				}
 			}
+			if rv := gjson.GetBytes(data, authFileRenewalDayField); rv.Type == gjson.Number {
+				if renewalDay, okDay := authFileRenewalDayValue(json.Number(rv.Raw)); okDay {
+					fileData[authFileRenewalDayField] = renewalDay
+				}
+			}
 			if wv := gjson.GetBytes(data, "websockets"); wv.Exists() {
 				switch wv.Type {
 				case gjson.True:
@@ -773,6 +778,11 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
 			if trimmed := strings.TrimSpace(rawNote); trimmed != "" {
 				entry["note"] = trimmed
 			}
+		}
+	}
+	if auth.Metadata != nil {
+		if renewalDay, ok := authFileRenewalDayValue(auth.Metadata[authFileRenewalDayField]); ok {
+			entry[authFileRenewalDayField] = renewalDay
 		}
 	}
 	if weight, ok := authWeightValue(auth); ok {
