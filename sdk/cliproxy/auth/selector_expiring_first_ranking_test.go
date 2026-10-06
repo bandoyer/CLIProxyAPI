@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -148,6 +150,87 @@ func TestExpiringFirstCreditOnlyCredentialsAreUsedInTurn(t *testing.T) {
 		if got := executeClaudeThread(t, manager, thread); got != want {
 			t.Fatalf("%s: credential = %s, want %s (round-robin among credit-only credentials)", thread, got, want)
 		}
+	}
+}
+
+// registerClaudeCredential adds a Claude credential in a priority tier.
+func registerClaudeCredential(t *testing.T, manager *Manager, id string, priority int) {
+	t.Helper()
+	registry.GetGlobalRegistry().RegisterClient(id, "claude", []*registry.ModelInfo{{ID: expiringFirstTestModel}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	auth := &Auth{ID: id, Provider: "claude", Status: StatusActive, Attributes: map[string]string{"priority": strconv.Itoa(priority)}}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+}
+
+func TestExpiringFirstPriorityTierComesBeforeUrgency(t *testing.T) {
+	clock := newAffinityTestClock()
+	manager := newExpiringFirstManager(t, clock)
+	payPerToken, subscription := "ef-1-"+t.Name(), "ef-2-"+t.Name()
+	registerClaudeCredential(t, manager, payPerToken, 0)
+	registerClaudeCredential(t, manager, subscription, 10)
+	recordSevenDay(manager, clock, payPerToken, 0.90, time.Hour)
+	recordSevenDay(manager, clock, subscription, 0.90, 6*24*time.Hour)
+
+	if got := executeClaudeThread(t, manager, "thread-1"); got != subscription {
+		t.Fatalf("credential = %s, want %s in the higher tier although %s is more urgent", got, subscription, payPerToken)
+	}
+}
+
+func TestExpiringFirstLowerTierServesOnlyWhenHigherTierHasNoUsableCredential(t *testing.T) {
+	tests := []struct {
+		name      string
+		affinity  bool
+		blockHigh func(manager *Manager, clock *affinityTestClock, id string)
+	}{
+		{
+			name:     "higher tier credential has an exhausted window",
+			affinity: true,
+			blockHigh: func(manager *Manager, clock *affinityTestClock, id string) {
+				recordGating(manager, clock, id, 0, time.Hour)
+			},
+		},
+		{
+			name:     "higher tier credential has an exhausted window, without affinity",
+			affinity: false,
+			blockHigh: func(manager *Manager, clock *affinityTestClock, id string) {
+				recordGating(manager, clock, id, 0, time.Hour)
+			},
+		},
+		{
+			name:     "higher tier credential is disabled",
+			affinity: true,
+			blockHigh: func(manager *Manager, _ *affinityTestClock, id string) {
+				auth, _ := manager.GetByID(id)
+				auth.Disabled = true
+				auth.Status = StatusDisabled
+				if _, errUpdate := manager.Update(WithSkipPersist(context.Background()), auth); errUpdate != nil {
+					panic(errUpdate)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newAffinityTestClock()
+			manager := newExpiringFirstManager(t, clock)
+			if !tc.affinity {
+				manager.SetSelector(NewExpiringFirstSelector(ExpiringFirstConfig{Readings: manager.QuotaReadings(), NowFunc: clock.Now}))
+			}
+			low, high := "ef-1-"+t.Name(), "ef-2-"+t.Name()
+			registerClaudeCredential(t, manager, low, 0)
+			registerClaudeCredential(t, manager, high, 10)
+			recordSevenDay(manager, clock, high, 0.50, 6*24*time.Hour)
+
+			if got := executeClaudeThread(t, manager, "thread-1"); got != high {
+				t.Fatalf("before: credential = %s, want the higher tier %s", got, high)
+			}
+			tc.blockHigh(manager, clock, high)
+			if got := executeClaudeThread(t, manager, "thread-2"); got != low {
+				t.Fatalf("after: credential = %s, want the lower tier %s", got, low)
+			}
+		})
 	}
 }
 

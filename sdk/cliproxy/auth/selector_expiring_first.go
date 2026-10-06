@@ -54,13 +54,33 @@ func (s *ExpiringFirstSelector) now() time.Time {
 	return time.Now()
 }
 
-// Pick selects the most urgent usable credential. Credentials with an
-// exhausted quota window are dropped first. Inside the tier, credentials with
-// a known urgency come first, then credentials with no reading, then
-// credentials that can serve only from a credit balance.
+// tierRankingSelector is a selector that keeps the highest priority tier
+// itself, after dropping credentials by its own usability rules. Callers
+// offer it every tier, so a tier whose credentials it drops falls through to
+// the next one.
+type tierRankingSelector interface {
+	ranksPriorityTiers()
+}
+
+func (s *ExpiringFirstSelector) ranksPriorityTiers() {}
+
+// selectorTierCandidates narrows available credentials to the highest
+// priority tier, unless the selector keeps the tier itself.
+func selectorTierCandidates(selector Selector, available []*Auth) []*Auth {
+	if _, ranksTiers := selector.(tierRankingSelector); ranksTiers {
+		return available
+	}
+	return highestPriorityAuths(available)
+}
+
+// Pick selects the most urgent usable credential. It drops credentials with
+// an exhausted quota window, keeps the highest priority tier left, and ranks
+// it: credentials with a known urgency first, then credentials with no
+// reading, then credentials that can serve only from a credit balance.
+// Candidates from different providers compete in one ranking.
 func (s *ExpiringFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	now := s.now()
-	available, errAvailable := getSelectorAvailableAuths(ctx, auths, provider, model, now)
+	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, auths, provider, model, now)
 	if errAvailable != nil {
 		return nil, errAvailable
 	}
@@ -68,6 +88,7 @@ func (s *ExpiringFirstSelector) Pick(ctx context.Context, provider, model string
 	if errUsable != nil {
 		return nil, errUsable
 	}
+	usable = highestPriorityAuths(usable)
 	usable = preferCodexWebsocketAuths(ctx, provider, usable)
 
 	thread := expiringFirstThread(opts.Metadata)
