@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
@@ -84,6 +85,7 @@ func (s *Service) Run(ctx context.Context) error {
 				log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
 			}
 		}
+		s.restoreSessionBindings(ctx)
 		s.registerAvailableExecutors(ctx, executorRegistrationOptions{
 			includeBaseline: true,
 			auths:           s.coreManager.List(),
@@ -91,6 +93,10 @@ func (s *Service) Run(ctx context.Context) error {
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(ctx, interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
+		s.startUsagePoller(ctx)
+	}
+	if s.coreManager != nil {
+		go s.coreManager.NewQuotaResetLog(nil).Run(ctx, quotareading.DefaultResetLogInterval)
 	}
 
 	if !homeEnabled {
@@ -286,6 +292,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.watcherCancel != nil {
 			s.watcherCancel()
 		}
+		s.stopUsagePoller()
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
 		}
@@ -332,6 +339,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				}
 			}
 		}
+
+		// Requests have stopped, so the bindings are final. A crash skips this.
+		s.saveSessionBindings(ctx)
 
 		if s.pluginHost != nil {
 			sdktranslator.SetPluginHooks(nil)

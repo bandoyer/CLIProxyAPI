@@ -1,0 +1,11 @@
+# Runs one round of CLIProxyAPI checks and sends a desktop notification for
+# each new problem. Started by cli-proxy-api-monitor.timer; see
+# scripts/cli-proxy-api-monitor.sh.
+[Unit]
+Description=Check CLIProxyAPI health, credentials, config backup and wasted quota
+
+[Service]
+Type=oneshot
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+ExecStart=%h/.local/bin/cli-proxy-api-monitor
+UMask=0077

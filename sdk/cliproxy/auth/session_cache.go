@@ -2,6 +2,7 @@ package auth
 
 import (
 	"container/list"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ type SessionCache struct {
 	evictionElements map[string]*list.Element
 	maxEntries       int
 	ttl              time.Duration
+	nowFunc          func() time.Time
 	stopCh           chan struct{}
 	stopOnce         sync.Once
 }
@@ -40,11 +42,20 @@ func NewSessionCache(ttl time.Duration) *SessionCache {
 
 // NewSessionCacheWithCapacity creates a cache with the specified TTL and max entries limit.
 func NewSessionCacheWithCapacity(ttl time.Duration, maxEntries int) *SessionCache {
+	return newSessionCache(ttl, maxEntries, nil)
+}
+
+// newSessionCache creates a cache that reads time from nowFunc (time.Now when nil),
+// so binding expiry and sliding refresh can run on a controllable clock.
+func newSessionCache(ttl time.Duration, maxEntries int, nowFunc func() time.Time) *SessionCache {
 	if ttl <= 0 {
 		ttl = 30 * time.Minute
 	}
 	if maxEntries <= 0 {
 		maxEntries = defaultMaxSessionEntries
+	}
+	if nowFunc == nil {
+		nowFunc = time.Now
 	}
 	c := &SessionCache{
 		entries:          make(map[string]sessionEntry),
@@ -53,10 +64,18 @@ func NewSessionCacheWithCapacity(ttl time.Duration, maxEntries int) *SessionCach
 		evictionElements: make(map[string]*list.Element),
 		maxEntries:       maxEntries,
 		ttl:              ttl,
+		nowFunc:          nowFunc,
 		stopCh:           make(chan struct{}),
 	}
 	go c.cleanupLoop()
 	return c
+}
+
+func (c *SessionCache) now() time.Time {
+	if c.nowFunc != nil {
+		return c.nowFunc()
+	}
+	return time.Now()
 }
 
 func (c *SessionCache) ensureInitializedLocked() {
@@ -81,7 +100,7 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 		return "", false
 	}
 	c.mu.RLock()
-	now := time.Now()
+	now := c.now()
 	entry, ok := c.entries[sessionID]
 	if ok && now.Before(entry.expiresAt) {
 		c.mu.RUnlock()
@@ -99,7 +118,7 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if time.Now().Before(entry.expiresAt) {
+	if c.now().Before(entry.expiresAt) {
 		return entry.authID, true
 	}
 	c.removeAliasGroupLocked(entry)
@@ -119,7 +138,7 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	now := time.Now()
+	now := c.now()
 	if !now.Before(entry.expiresAt) {
 		c.removeAliasGroupLocked(entry)
 		return "", false
@@ -147,7 +166,7 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitializedLocked()
-	now := time.Now()
+	now := c.now()
 
 	aliases := mergeSessionAliases(nil, sessionIDs...)
 	previousGroups := make([]sessionEntry, 0, len(sessionIDs))
@@ -317,7 +336,7 @@ func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitializedLocked()
-	now := time.Now()
+	now := c.now()
 	entry, ok := c.entries[sessionID]
 	if !ok || entry.authID != expectedAuthID || !now.Before(entry.expiresAt) {
 		return false
@@ -424,6 +443,65 @@ func (c *SessionCache) cleanupLoop() {
 	}
 }
 
+// snapshot returns every unexpired binding, one record per alias group.
+func (c *SessionCache) snapshot() []SessionBindingRecord {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	now := c.now()
+	records := make([]SessionBindingRecord, 0, len(c.groups))
+	for _, group := range c.groups {
+		if !now.Before(group.expiresAt) || len(group.aliases) == 0 {
+			continue
+		}
+		records = append(records, SessionBindingRecord{
+			AuthID:    group.authID,
+			ExpiresAt: group.expiresAt,
+			Keys:      append([]string(nil), group.aliases...),
+		})
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].Keys[0] < records[j].Keys[0] })
+	return records
+}
+
+// restore adds saved bindings with their saved expiry, dropping those already
+// expired on the cache's clock. An expiry beyond one lifetime from now is capped,
+// so a shortened TTL applies to restored bindings. It returns how many were restored.
+func (c *SessionCache) restore(records []SessionBindingRecord) int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitializedLocked()
+	now := c.now()
+	restored := 0
+	for _, record := range records {
+		if record.AuthID == "" || !now.Before(record.ExpiresAt) {
+			continue
+		}
+		aliases := compactSessionAliases(mergeSessionAliases(nil, record.Keys...))
+		if len(aliases) == 0 {
+			continue
+		}
+		expiresAt := record.ExpiresAt
+		if limit := now.Add(c.ttl); expiresAt.After(limit) {
+			expiresAt = limit
+		}
+		previous := make([]sessionEntry, 0, len(aliases))
+		for _, alias := range aliases {
+			if entry, ok := c.entries[alias]; ok {
+				previous = append(previous, entry)
+			}
+		}
+		c.replaceAliasGroupsLocked(record.AuthID, expiresAt, aliases, previous...)
+		restored++
+	}
+	return restored
+}
+
 // Len returns the current count of tracked session aliases.
 func (c *SessionCache) Len() int {
 	if c == nil {
@@ -435,7 +513,7 @@ func (c *SessionCache) Len() int {
 }
 
 func (c *SessionCache) cleanup() {
-	now := time.Now()
+	now := c.now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitializedLocked()

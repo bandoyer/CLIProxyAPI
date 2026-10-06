@@ -411,35 +411,7 @@ func canonicalModelKey(model string) string {
 }
 
 func authWebsocketsEnabled(auth *Auth) bool {
-	if auth == nil {
-		return false
-	}
-	if len(auth.Attributes) > 0 {
-		if raw := strings.TrimSpace(auth.Attributes["websockets"]); raw != "" {
-			parsed, errParse := strconv.ParseBool(raw)
-			if errParse == nil {
-				return parsed
-			}
-		}
-	}
-	if len(auth.Metadata) == 0 {
-		return false
-	}
-	raw, ok := auth.Metadata["websockets"]
-	if !ok || raw == nil {
-		return false
-	}
-	switch v := raw.(type) {
-	case bool:
-		return v
-	case string:
-		parsed, errParse := strconv.ParseBool(strings.TrimSpace(v))
-		if errParse == nil {
-			return parsed
-		}
-	default:
-	}
-	return false
+	return auth.WebsocketsEnabled()
 }
 
 func preferCodexWebsocketAuths(ctx context.Context, provider string, available []*Auth) []*Auth {
@@ -914,6 +886,12 @@ type SessionAffinitySelector struct {
 	cache            *SessionCache
 	matcher          *cliproxysession.MerklePrefixMatcher
 	subagentAffinity bool
+	nowFunc          func() time.Time
+
+	// detours holds bindings whose credential is recovering from an upstream
+	// overload (5xx or 529), keyed by binding cache key.
+	detourMu sync.Mutex
+	detours  map[string]affinityDetour
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -921,6 +899,10 @@ type SessionAffinityConfig struct {
 	Fallback         Selector
 	TTL              time.Duration
 	SubagentAffinity *bool
+	// NowFunc is the clock that binding expiry, sliding refresh, the LCP matcher
+	// and the selector's availability checks read. Nil means time.Now. Tests
+	// inject a controllable clock here instead of sleeping.
+	NowFunc func() time.Time
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -943,12 +925,62 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 	if cfg.SubagentAffinity != nil {
 		subagentAffinity = *cfg.SubagentAffinity
 	}
+	nowFunc := cfg.NowFunc
+	if nowFunc == nil {
+		nowFunc = time.Now
+	}
 	return &SessionAffinitySelector{
 		fallback:         cfg.Fallback,
-		cache:            NewSessionCache(cfg.TTL),
-		matcher:          cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
+		cache:            newSessionCache(cfg.TTL, defaultMaxSessionEntries, nowFunc),
+		matcher:          cliproxysession.NewMerklePrefixMatcherWithConfig(cliproxysession.MerklePrefixMatcherConfig{TTL: cfg.TTL, NowFunc: nowFunc}),
 		subagentAffinity: subagentAffinity,
+		nowFunc:          nowFunc,
 	}
+}
+
+// now returns the selector's current time from its injected clock.
+func (s *SessionAffinitySelector) now() time.Time {
+	if s != nil && s.nowFunc != nil {
+		return s.nowFunc()
+	}
+	return time.Now()
+}
+
+// bindingKeptObserver is implemented by fallback selectors that log picks
+// affinity served from an existing binding (the expiring-first selector).
+type bindingKeptObserver interface {
+	observeBindingKept(ctx context.Context, provider, model, thread string, auth *Auth)
+}
+
+// reportBindingKept tells the fallback selector that a binding served a pick.
+func (s *SessionAffinitySelector) reportBindingKept(ctx context.Context, provider, model, thread string, auth *Auth) {
+	if s == nil {
+		return
+	}
+	if observer, ok := s.fallback.(bindingKeptObserver); ok {
+		observer.observeBindingKept(ctx, provider, model, thread, auth)
+	}
+}
+
+// creditOnlyMoveAdvisor is implemented by fallback selectors that rank
+// credit-only credentials last (the expiring-first selector). It returns the
+// candidates to pick a bound thread again from when the bound credential
+// serves only from credits while subscription quota is left in its tier, or
+// nil to keep the binding.
+type creditOnlyMoveAdvisor interface {
+	creditOnlyMoveCandidates(ctx context.Context, provider, model string, bound *Auth, available []*Auth) []*Auth
+}
+
+// creditOnlyMoveCandidates asks the fallback selector whether a binding on a
+// credit-only credential should end.
+func (s *SessionAffinitySelector) creditOnlyMoveCandidates(ctx context.Context, provider, model string, bound *Auth, available []*Auth) []*Auth {
+	if s == nil {
+		return nil
+	}
+	if advisor, ok := s.fallback.(creditOnlyMoveAdvisor); ok {
+		return advisor.creditOnlyMoveCandidates(ctx, provider, model, bound, available)
+	}
+	return nil
 }
 
 // Trees returns a backward-compatible in-memory session tree store.
@@ -1013,27 +1045,28 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = primaryID
 		}
 	}
-	now := time.Now()
+	now := s.now()
 	availabilityCandidates := auths
 	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
 	if primaryID == "" {
-		fallbackAuths, errAvailable := getSelectorAvailableAuths(ctx, availabilityCandidates, provider, model, now)
+		available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 		if errAvailable != nil {
 			return nil, errAvailable
 		}
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
-		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		return s.fallback.Pick(ctx, provider, model, opts, selectorTierCandidates(s.fallback, available))
 	}
 
 	// A single availability pass serves both lookups: the bound credential is validated against
-	// every priority tier, while the fallback selector keeps seeing only the highest tier.
+	// every priority tier, while the fallback selector keeps seeing only the highest tier (or
+	// every tier, when it keeps the tier itself).
 	available, err := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := selectorTierCandidates(s.fallback, available)
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
@@ -1059,8 +1092,22 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				if candidates := s.creditOnlyMoveCandidates(ctx, provider, model, auth, available); len(candidates) > 0 {
+					// The bound credential would spend credits while its tier
+					// still has subscription quota: end the binding and pick again.
+					moved, errMove := s.fallback.Pick(ctx, provider, model, opts, candidates)
+					if errMove == nil && moved != nil {
+						if moved.ID != auth.ID {
+							logBindingEnded(ctx, primaryID, auth.ID, auth.Provider, model, bindingEndSubscriptionExhausted)
+							entry.Infof("session-affinity: bound auth serves only from credits, reselected | session=%s bound=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, moved.ID, provider, model)
+						}
+						bind(moved.ID)
+						return moved, nil
+					}
+				}
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+				s.reportBindingKept(ctx, provider, model, primaryID, auth)
 				return auth, nil
 			}
 		}
@@ -1072,6 +1119,14 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if auth == nil {
 			return nil, nil
 		}
+		if s.detourActive(cacheKey, cachedAuthID) {
+			// The bound credential is recovering from an upstream overload: serve
+			// this request elsewhere and keep the binding on the warm credential.
+			entry.Infof("session-affinity: bound auth recovering from upstream overload, detour without rebinding | session=%s bound=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
+			return auth, nil
+		}
+		boundProvider, endReason := bindingEndReasonFromContext(ctx, cachedAuthID, model)
+		logBindingEnded(ctx, primaryID, cachedAuthID, boundProvider, model, endReason)
 		bind(auth.ID)
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 		return auth, nil
@@ -1082,12 +1137,23 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
 					if !isSubagent || s.subagentAffinity {
+						if candidates := s.creditOnlyMoveCandidates(ctx, provider, model, auth, available); len(candidates) > 0 {
+							// Don't follow the parent onto credits while its tier
+							// still has subscription quota: bind this thread cold.
+							picked, errPick := s.fallback.Pick(ctx, provider, model, opts, candidates)
+							if errPick == nil && picked != nil {
+								bind(picked.ID)
+								entry.Infof("session-affinity: parent auth serves only from credits, new binding | session=%s fallback=%s parent_auth=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, picked.ID, provider, model)
+								return picked, nil
+							}
+						}
 						bind(auth.ID)
 						if isFork {
 							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						} else {
 							entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						}
+						s.reportBindingKept(ctx, provider, model, primaryID, auth)
 						return auth, nil
 					}
 				}
@@ -1138,7 +1204,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
-	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, time.Now())
+	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, s.now())
 	if errAvailable != nil {
 		return nil, true, errAvailable
 	}
@@ -1182,11 +1248,12 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				}
 				entry.Infof("session-affinity: LCP cache hit | session=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.PrefixLength, auth.ID, provider, model)
 			}
+			s.reportBindingKept(ctx, provider, model, match.SessionID, auth)
 			return auth, true, nil
 		}
 	}
 
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := selectorTierCandidates(s.fallback, available)
 	auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if errPick != nil {
 		return nil, true, errPick
@@ -1338,6 +1405,23 @@ func (s *SessionAffinitySelector) Stop() {
 	if s.matcher != nil {
 		s.matcher.Clear()
 	}
+}
+
+// sessionBindings returns the selector's unexpired bindings for persistence.
+// LCP matcher state is not included; it only serves requests without a thread identifier.
+func (s *SessionAffinitySelector) sessionBindings() []SessionBindingRecord {
+	if s == nil {
+		return nil
+	}
+	return s.cache.snapshot()
+}
+
+// restoreSessionBindings loads persisted bindings and returns how many were kept.
+func (s *SessionAffinitySelector) restoreSessionBindings(records []SessionBindingRecord) int {
+	if s == nil {
+		return 0
+	}
+	return s.cache.restore(records)
 }
 
 // InvalidateAuth removes all session bindings for a specific auth.
@@ -1538,16 +1622,45 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
 	}
 	if res.Success {
-		s.cache.Touch(cacheKey, res.AuthID)
-		if fallbackKey != "" {
-			s.cache.Touch(fallbackKey, res.AuthID)
+		// A success on a detour credential matches no binding, so Touch leaves
+		// the binding on the warm credential. A success on the bound credential
+		// ends any detour.
+		if s.cache.Touch(cacheKey, res.AuthID) {
+			s.clearDetour(cacheKey)
+		}
+		if fallbackKey != "" && s.cache.Touch(fallbackKey, res.AuthID) {
+			s.clearDetour(fallbackKey)
 		}
 		return
 	}
 
-	s.cache.CompareAndDelete(cacheKey, res.AuthID)
-	if fallbackKey != "" {
-		s.cache.CompareAndDelete(fallbackKey, res.AuthID)
+	if isUpstreamOverloadResult(res.Error) {
+		// An upstream 5xx or 529 detours only this request. The binding stays on
+		// the warm credential so the thread returns to it once it is usable.
+		now := s.now()
+		until := now.Add(upstreamOverloadDetourWindow(now, res.RetryAfter))
+		s.markDetour(cacheKey, res.AuthID, until)
+		if fallbackKey != "" {
+			s.markDetour(fallbackKey, res.AuthID, until)
+		}
+		return
+	}
+
+	ended := false
+	if s.cache.CompareAndDelete(cacheKey, res.AuthID) {
+		s.clearDetour(cacheKey)
+		ended = true
+	}
+	if fallbackKey != "" && s.cache.CompareAndDelete(fallbackKey, res.AuthID) {
+		s.clearDetour(fallbackKey)
+		ended = true
+	}
+	if ended {
+		thread := primaryID
+		if thread == "" {
+			thread = fallbackID
+		}
+		logBindingEnded(context.Background(), thread, res.AuthID, res.Provider, nsModel, bindingEndReasonForStatus(res.Error.StatusCode()))
 	}
 }
 
