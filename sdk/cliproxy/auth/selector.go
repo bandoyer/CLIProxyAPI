@@ -1030,21 +1030,22 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
 	if primaryID == "" {
-		fallbackAuths, errAvailable := getSelectorAvailableAuths(ctx, availabilityCandidates, provider, model, now)
+		available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 		if errAvailable != nil {
 			return nil, errAvailable
 		}
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
-		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		return s.fallback.Pick(ctx, provider, model, opts, selectorTierCandidates(s.fallback, available))
 	}
 
 	// A single availability pass serves both lookups: the bound credential is validated against
-	// every priority tier, while the fallback selector keeps seeing only the highest tier.
+	// every priority tier, while the fallback selector keeps seeing only the highest tier (or
+	// every tier, when it keeps the tier itself).
 	available, err := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := selectorTierCandidates(s.fallback, available)
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
@@ -1090,6 +1091,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			entry.Infof("session-affinity: bound auth recovering from upstream overload, detour without rebinding | session=%s bound=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
 			return auth, nil
 		}
+		boundProvider, endReason := bindingEndReasonFromContext(ctx, cachedAuthID, model)
+		logBindingEnded(ctx, primaryID, cachedAuthID, boundProvider, model, endReason)
 		bind(auth.ID)
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 		return auth, nil
@@ -1206,7 +1209,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		}
 	}
 
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := selectorTierCandidates(s.fallback, available)
 	auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if errPick != nil {
 		return nil, true, errPick
@@ -1599,11 +1602,21 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		return
 	}
 
+	ended := false
 	if s.cache.CompareAndDelete(cacheKey, res.AuthID) {
 		s.clearDetour(cacheKey)
+		ended = true
 	}
 	if fallbackKey != "" && s.cache.CompareAndDelete(fallbackKey, res.AuthID) {
 		s.clearDetour(fallbackKey)
+		ended = true
+	}
+	if ended {
+		thread := primaryID
+		if thread == "" {
+			thread = fallbackID
+		}
+		logBindingEnded(context.Background(), thread, res.AuthID, res.Provider, nsModel, bindingEndReasonForStatus(res.Error.StatusCode()))
 	}
 }
 
