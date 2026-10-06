@@ -16,6 +16,10 @@ const (
 	bindingEndForbidden            = "forbidden"
 	bindingEndDisabled             = "disabled"
 	bindingEndUnavailable          = "unavailable"
+	// bindingEndSubscriptionExhausted: the bound credential can serve only
+	// from its credit balance, and its priority tier still has a credential
+	// with subscription quota.
+	bindingEndSubscriptionExhausted = "subscription_exhausted"
 )
 
 // bindingEndReasonFunc tells the affinity selector which provider a bound

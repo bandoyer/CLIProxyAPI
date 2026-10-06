@@ -209,6 +209,39 @@ func (s *ExpiringFirstSelector) quotaStanding(credentialID, model string, now ti
 	}
 }
 
+// creditOnlyMoveCandidates returns the credentials a bound thread should be
+// picked again from when its bound credential can serve the model only from
+// a credit balance: the bound credential's priority tier, when that tier has
+// a usable credential with subscription quota. It returns nil when the
+// binding should stay, so a thread never moves between credit-only
+// credentials.
+func (s *ExpiringFirstSelector) creditOnlyMoveCandidates(ctx context.Context, provider, model string, bound *Auth, available []*Auth) []*Auth {
+	if s == nil || bound == nil {
+		return nil
+	}
+	now := s.now()
+	if standing, _ := s.quotaStanding(bound.ID, model, now); standing != standingCreditOnly {
+		return nil
+	}
+	tierPriority := authPriority(bound)
+	tier := make([]*Auth, 0, len(available))
+	for _, candidate := range available {
+		if authPriority(candidate) == tierPriority {
+			tier = append(tier, candidate)
+		}
+	}
+	usable, creditOnly, errUsable := s.usableByQuota(tier, provider, model, now)
+	if errUsable != nil {
+		return nil
+	}
+	for _, candidate := range preferCodexWebsocketAuths(ctx, provider, usable) {
+		if !creditOnly[candidate.ID] {
+			return tier
+		}
+	}
+	return nil
+}
+
 // Pick-log reasons. The routing report parses these tokens.
 const (
 	expiringFirstReasonBindingKept = "binding_kept"
