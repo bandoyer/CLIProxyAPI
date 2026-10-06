@@ -98,13 +98,14 @@ test_report_prints_picks_per_credential_by_reason() {
 		'expiring-first pick | credential=claude dlb.json urgency=13.10%/h reason=binding_kept thread=header:thread-1 provider=mixed model=claude-sonnet-4-5' \
 		'expiring-first pick | credential=claude dlb.json urgency=13.00%/h reason=binding_kept thread=header:thread-1 provider=mixed model=claude-sonnet-4-5' \
 		'expiring-first pick | credential=codex-b.json urgency=no_data reason=no_data thread=- provider=mixed model=gpt-5' \
-		'expiring-first pick | credential=codex-b.json urgency=no_data reason=credit_only thread=codex:abc provider=mixed model=gpt-5'
+		'expiring-first pick | credential=codex-b.json urgency=no_data reason=credit_only thread=codex:abc provider=mixed model=gpt-5' \
+		'expiring-first pick | credential=codex-b.json urgency=no_data reason=future_reason thread=codex:abc provider=mixed model=gpt-5'
 	run_report 24
 	assert_eq 0 "$STATUS" "exit status (stderr: $ERR)"
 	assert_contains "$OUT" "Picks per credential" "report"
-	assert_row "CREDENTIAL PICKS MORE_URGENT NO_DATA BINDING_KEPT CREDIT_ONLY"
-	assert_row "claude dlb.json 3 1 0 2 0"
-	assert_row "codex-b.json 2 0 1 0 1"
+	assert_row "CREDENTIAL PICKS MORE_URGENT NO_DATA BINDING_KEPT CREDIT_ONLY OTHER"
+	assert_row "claude dlb.json 3 1 0 2 0 0"
+	assert_row "codex-b.json 3 0 1 0 1 1"
 }
 
 # journal_as appends one line with a given request ID ("--------" for none),
@@ -128,6 +129,10 @@ test_report_prints_binding_moves_per_thread_with_reasons() {
 	journal_as r5 'expiring-first pick | credential=claude-a.json urgency=9.00%/h reason=more_urgent thread=claude:uuid-2 provider=mixed model=claude-opus-4-5'
 	# Thread 1 again: claude b is disabled, and no request follows yet.
 	journal_as -------- 'affinity binding ended | thread=header:thread 1 credential=claude b.json provider=claude model=claude-sonnet-4-5 reason=disabled'
+	# Thread 2 leaves claude-a, which has only paid credits left. Reason
+	# values are open-ended, so a newer reason is reported as logged.
+	journal_as r7 'expiring-first pick | credential=claude b.json urgency=7.00%/h reason=more_urgent thread=claude:uuid-2 provider=mixed model=claude-opus-4-5'
+	journal_as r7 'affinity binding ended | thread=claude:uuid-2 credential=claude-a.json provider=claude model=claude-opus-4-5 reason=subscription_exhausted'
 	# Thread 3 re-picks after its binding expired: not a move.
 	journal_as r6 'expiring-first pick | credential=codex-c.json urgency=no_data reason=no_data thread=codex:uuid-3 provider=mixed model=gpt-5'
 	run_report 24
@@ -137,6 +142,7 @@ test_report_prints_binding_moves_per_thread_with_reasons() {
 	assert_row "header:thread 1 1 claude-a.json claude b.json quota_window_exhausted"
 	assert_row "header:thread 1 2 claude b.json ? disabled"
 	assert_row "claude:uuid-2 1 claude b.json claude-a.json quota_exceeded_429"
+	assert_row "claude:uuid-2 2 claude-a.json claude b.json subscription_exhausted"
 	[[ "$OUT" != *codex:uuid-3* ]] || fail "re-pick after expiry reported as a move: [$OUT]"
 }
 

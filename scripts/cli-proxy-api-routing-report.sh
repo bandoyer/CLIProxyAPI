@@ -145,7 +145,8 @@ binding_moves() {
 }
 
 # picks prints one row per credential from the expiring-first pick log: the
-# number of picks, then the count for each reason.
+# number of picks, then the count for each known reason. Reason values are
+# open-ended, so picks with any other reason are counted under OTHER.
 picks() {
 	awk '
 		BEGIN { split("more_urgent no_data binding_kept credit_only", reasons, " ") }
@@ -162,12 +163,16 @@ picks() {
 		}
 		END {
 			if (!n) exit
-			print "CREDENTIAL\tPICKS\tMORE_URGENT\tNO_DATA\tBINDING_KEPT\tCREDIT_ONLY"
+			print "CREDENTIAL\tPICKS\tMORE_URGENT\tNO_DATA\tBINDING_KEPT\tCREDIT_ONLY\tOTHER"
 			for (i = 1; i <= n; i++) {
 				credential = order[i]
 				printf "%s\t%d", credential, total[credential]
-				for (r = 1; r <= 4; r++) printf "\t%d", count[credential, reasons[r]]
-				printf "\n"
+				other = total[credential]
+				for (r = 1; r <= 4; r++) {
+					printf "\t%d", count[credential, reasons[r]]
+					other -= count[credential, reasons[r]]
+				}
+				printf "\t%d\n", other
 			}
 		}' | table
 }

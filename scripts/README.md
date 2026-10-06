@@ -216,7 +216,9 @@ The report has three summaries. A summary with no log lines shows `none`.
 
 - **Wasted quota per credential and window**, from the `quota window reset` lines. `RESETS` is the number of resets. `WASTED` is the total share left at those resets, as a percentage of one window. `LAST` is the share left at the latest reset.
 - **Binding moves per thread**, from the `affinity binding ended` lines. Each row is one ended binding: `FROM` is the credential that the thread left, `TO` is the credential of the thread's next pick, and `REASON` is the reason in the log. `?` means that no pick followed yet. A pick that has no ended binding before it is not a move. Examples are a new thread, or a binding that expired after 1 hour idle.
-- **Picks per credential**, from the `expiring-first pick` lines, with a count for each reason.
+- **Picks per credential**, from the `expiring-first pick` lines, with a count for each reason: `more_urgent`, `no_data`, `binding_kept` and `credit_only`. `OTHER` counts picks with any other reason.
+
+The report prints each binding-end reason as it is in the log, so a new reason value needs no change to the report. The reasons are defined in `sdk/cliproxy/auth/session_affinity_binding_end.go`.
 
 Quota readings are kept only in memory. After a restart, a window logs its reset only after a new reading arrives.
 
