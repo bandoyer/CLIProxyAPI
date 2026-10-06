@@ -887,6 +887,11 @@ type SessionAffinitySelector struct {
 	matcher          *cliproxysession.MerklePrefixMatcher
 	subagentAffinity bool
 	nowFunc          func() time.Time
+
+	// detours holds bindings whose credential is recovering from an upstream
+	// overload (5xx or 529), keyed by binding cache key.
+	detourMu sync.Mutex
+	detours  map[string]affinityDetour
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -1061,6 +1066,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		if auth == nil {
 			return nil, nil
+		}
+		if s.detourActive(cacheKey, cachedAuthID) {
+			// The bound credential is recovering from an upstream overload: serve
+			// this request elsewhere and keep the binding on the warm credential.
+			entry.Infof("session-affinity: bound auth recovering from upstream overload, detour without rebinding | session=%s bound=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
+			return auth, nil
 		}
 		bind(auth.ID)
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
@@ -1545,16 +1556,35 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
 	}
 	if res.Success {
-		s.cache.Touch(cacheKey, res.AuthID)
-		if fallbackKey != "" {
-			s.cache.Touch(fallbackKey, res.AuthID)
+		// A success on a detour credential matches no binding, so Touch leaves
+		// the binding on the warm credential. A success on the bound credential
+		// ends any detour.
+		if s.cache.Touch(cacheKey, res.AuthID) {
+			s.clearDetour(cacheKey)
+		}
+		if fallbackKey != "" && s.cache.Touch(fallbackKey, res.AuthID) {
+			s.clearDetour(fallbackKey)
 		}
 		return
 	}
 
-	s.cache.CompareAndDelete(cacheKey, res.AuthID)
-	if fallbackKey != "" {
-		s.cache.CompareAndDelete(fallbackKey, res.AuthID)
+	if isUpstreamOverloadResult(res.Error) {
+		// An upstream 5xx or 529 detours only this request. The binding stays on
+		// the warm credential so the thread returns to it once it is usable.
+		now := s.now()
+		until := now.Add(upstreamOverloadDetourWindow(now, res.RetryAfter))
+		s.markDetour(cacheKey, res.AuthID, until)
+		if fallbackKey != "" {
+			s.markDetour(fallbackKey, res.AuthID, until)
+		}
+		return
+	}
+
+	if s.cache.CompareAndDelete(cacheKey, res.AuthID) {
+		s.clearDetour(cacheKey)
+	}
+	if fallbackKey != "" && s.cache.CompareAndDelete(fallbackKey, res.AuthID) {
+		s.clearDetour(fallbackKey)
 	}
 }
 
