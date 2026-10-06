@@ -1,11 +1,15 @@
 package auth
 
 import (
+	"context"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // recordGating gives a credential a Claude 5-hour (gating) reading.
@@ -19,6 +23,46 @@ func recordGating(manager *Manager, clock *affinityTestClock, credentialID strin
 		LearnedAt: clock.Now(),
 		Source:    quotareading.SourceHeader,
 	})
+}
+
+func TestExpiringFirstExhaustedGatingWindowSkipsCredentialUntilItsReset(t *testing.T) {
+	clock := newAffinityTestClock()
+	gated, other := "ef-1-"+t.Name(), "ef-2-"+t.Name()
+	manager := newExpiringFirstManager(t, clock, gated, other)
+	// The gated credential is the more urgent by its ranking window, but its
+	// 5-hour window is used up for the next hour.
+	recordSevenDay(manager, clock, gated, 0.90, 2*time.Hour)
+	recordGating(manager, clock, gated, 0, time.Hour)
+	recordSevenDay(manager, clock, other, 0.90, 4*24*time.Hour)
+
+	for _, thread := range []string{"thread-1", "thread-2"} {
+		if got := executeClaudeThread(t, manager, thread); got != other {
+			t.Fatalf("%s: credential = %s, want %s while %s has an exhausted 5-hour window", thread, got, other, gated)
+		}
+	}
+
+	clock.Advance(time.Hour + time.Minute)
+	if got := executeClaudeThread(t, manager, "thread-after-reset"); got != gated {
+		t.Fatalf("after the 5-hour reset: credential = %s, want the more urgent %s", got, gated)
+	}
+}
+
+func TestExpiringFirstEveryCredentialExhaustedReturnsQuotaCooldown(t *testing.T) {
+	clock := newAffinityTestClock()
+	first, second := "ef-1-"+t.Name(), "ef-2-"+t.Name()
+	manager := newExpiringFirstManager(t, clock, first, second)
+	recordGating(manager, clock, first, 0, 2*time.Hour)
+	recordSevenDay(manager, clock, second, 0, 30*time.Minute)
+
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"thread-1"}}, Metadata: map[string]any{}}
+	_, errExecute := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: expiringFirstTestModel}, opts)
+	var cooldown *modelCooldownError
+	if !errors.As(errExecute, &cooldown) {
+		t.Fatalf("execute error = %v, want a model cooldown error", errExecute)
+	}
+	if cooldown.resetIn != 30*time.Minute {
+		t.Fatalf("cooldown reset in %s, want 30m, the soonest reset of an exhausted window", cooldown.resetIn)
+	}
 }
 
 func TestExpiringFirstReadingWithPassedResetRanksAsFullWindow(t *testing.T) {

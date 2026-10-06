@@ -61,6 +61,10 @@ func (s *ExpiringFirstSelector) Pick(ctx context.Context, provider, model string
 	if errAvailable != nil {
 		return nil, errAvailable
 	}
+	available, errUsable := s.dropExhausted(available, provider, model, now)
+	if errUsable != nil {
+		return nil, errUsable
+	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 
 	var best *Auth
@@ -83,6 +87,52 @@ func (s *ExpiringFirstSelector) Pick(ctx context.Context, provider, model string
 	picked := s.nextNoData(provider+":"+canonicalModelKey(model), noData)
 	logExpiringFirstPick(ctx, picked, 0, false, expiringFirstReasonNoData, expiringFirstThread(opts.Metadata), provider, model)
 	return picked, nil
+}
+
+// dropExhausted removes credentials whose quota reading shows an exhausted
+// window that has not reset yet. When no credential is left, it returns a
+// quota cooldown error that lasts until the soonest such reset.
+func (s *ExpiringFirstSelector) dropExhausted(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	usable := make([]*Auth, 0, len(auths))
+	var soonestReset time.Time
+	for _, candidate := range auths {
+		exhaustedUntil := s.exhaustedUntil(candidate.ID, model, now)
+		if exhaustedUntil.IsZero() {
+			usable = append(usable, candidate)
+			continue
+		}
+		if soonestReset.IsZero() || exhaustedUntil.Before(soonestReset) {
+			soonestReset = exhaustedUntil
+		}
+	}
+	if len(usable) > 0 || len(auths) == 0 {
+		return usable, nil
+	}
+	providerForError := provider
+	if providerForError == "mixed" {
+		providerForError = ""
+	}
+	return nil, newModelCooldownError(model, providerForError, soonestReset.Sub(now))
+}
+
+// exhaustedUntil returns when the credential becomes usable again by its
+// quota reading: the latest reset among its exhausted windows that have not
+// reset yet. Zero means no window blocks it. A window without a reset time
+// never blocks, because nothing would end the block.
+func (s *ExpiringFirstSelector) exhaustedUntil(credentialID, model string, now time.Time) time.Time {
+	if s == nil || s.readings == nil {
+		return time.Time{}
+	}
+	var until time.Time
+	for _, reading := range s.readings.Readings(credentialID, canonicalModelKey(model)) {
+		if !reading.Exhausted() || !reading.ResetAt.After(now) {
+			continue
+		}
+		if reading.ResetAt.After(until) {
+			until = reading.ResetAt
+		}
+	}
+	return until
 }
 
 // Pick-log reasons. The routing report parses these tokens.
