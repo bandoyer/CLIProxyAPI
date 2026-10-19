@@ -44,14 +44,21 @@ func ParseXAIBillingBody(body []byte, learnedAt time.Time) ([]Reading, error) {
 	return readings, nil
 }
 
-// xaiCreditPeriodReading reads the credit period. A period without a
-// numeric creditUsagePercent gives no reading: unknown usage is not zero.
+// xaiCreditPeriodReading reads the credit period. xAI leaves
+// creditUsagePercent out while the period's usage rounds to 0%, so a current
+// period without the field reads as 0% used. A creditUsagePercent that is not
+// a number, or a body with neither field, gives no reading.
 func xaiCreditPeriodReading(config gjson.Result, learnedAt time.Time) (Reading, bool) {
-	usedPercent, ok := xaiNumber(codexBodyField(config, "creditUsagePercent", "credit_usage_percent"))
-	if !ok {
+	period := codexBodyField(config, "currentPeriod", "current_period")
+	usedPercent := 0.0
+	if percent := codexBodyField(config, "creditUsagePercent", "credit_usage_percent"); percent.Exists() {
+		var ok bool
+		if usedPercent, ok = xaiNumber(percent); !ok {
+			return Reading{}, false
+		}
+	} else if !period.IsObject() {
 		return Reading{}, false
 	}
-	period := codexBodyField(config, "currentPeriod", "current_period")
 	start := xaiTime(period.Get("start"))
 	if start.IsZero() {
 		start = xaiTime(codexBodyField(config, "billingPeriodStart", "billing_period_start"))

@@ -66,10 +66,34 @@ func TestParseXAIBillingBody(t *testing.T) {
 			},
 		},
 		{
-			name: "credit period without a usage percent gives no reading: unknown usage is not zero",
+			name: "credit period without creditUsagePercent reads as 0% used: xAI omits a zero",
+			body: `{"config": {
+				"currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY", "start": "2026-09-17T13:32:42.093205+00:00", "end": "2026-09-24T13:32:42.093205+00:00"},
+				"onDemandCap": {"val": 0},
+				"onDemandUsed": {"val": 0},
+				"isUnifiedBillingUser": true,
+				"prepaidBalance": {"val": 0},
+				"billingPeriodStart": "2026-09-17T13:32:42.093205+00:00",
+				"billingPeriodEnd": "2026-09-24T13:32:42.093205+00:00"
+			}}`,
+			want: []Reading{
+				{Window: XAICreditPeriodWindow, Kind: KindRanking, Length: 7 * 24 * time.Hour, ShareLeft: 1, ResetAt: weekEnd, LearnedAt: learnedAt, Source: SourcePoll},
+			},
+		},
+		{
+			name: "a creditUsagePercent that is not a number gives no reading",
 			body: `{"config": {
 				"currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY", "start": "2026-09-17T13:32:42Z", "end": "2026-09-24T13:32:42Z"},
 				"creditUsagePercent": "not-a-number"
+			}}`,
+			want: nil,
+		},
+		{
+			name: "monthly body without a current period gives no credit period reading",
+			body: `{"config": {
+				"monthlyLimit": {"val": 0}, "used": {"val": 0}, "onDemandCap": {"val": 0},
+				"billingPeriodStart": "2026-09-01T00:00:00+00:00",
+				"billingPeriodEnd": "2026-10-01T00:00:00+00:00"
 			}}`,
 			want: nil,
 		},
